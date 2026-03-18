@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# :^)
+# When ls-hubd calls us with just a service name (no slashes), resolve it to
+# the full path inside the jail so run-js-service can find the service dir.
+case "$1" in
+  */*) ;;  # already a path – leave it alone
+  *)   set -- "/media/developer/apps/usr/palm/services/$1" ;;
+esac
+
+# -k: disable the idle-exit timer so the service stays alive for the HTTP server
+set -- -k "$@"
+
+eval "$(sed -e '/^thirdparty_jail=/s/=.*/=off/' \
+            -e '\@/var/luna/preferences/devmode_enabled@s/if /&false \&\& /' \
+            '/usr/bin/run-js-service')"

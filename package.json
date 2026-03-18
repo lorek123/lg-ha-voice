@@ -1,0 +1,22 @@
+{
+  "name": "lg-ha-voice",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Home Assistant voice satellite app for rooted LG webOS TVs",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "deploy": "bash scripts/deploy.sh",
+    "icons": "bash scripts/generate-icons.sh",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@webos-tools/cli": "^3.0.2",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0",
+    "vitest": "^3.0.0"
+  }
+}

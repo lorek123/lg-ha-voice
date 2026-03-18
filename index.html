@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HA Voice</title>
+  <link rel="stylesheet" href="styles/app.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Config screen -->
+    <div id="screen-config" class="screen active">
+      <div class="config-panel">
+        <h1 class="logo">HA Voice</h1>
+        <p class="subtitle">Home Assistant Voice Satellite</p>
+
+        <div class="form-group">
+          <label for="ha-url">Home Assistant URL</label>
+          <input type="text" id="ha-url" placeholder="http://homeassistant.local:8123" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="ha-token">Long-Lived Access Token</label>
+          <input type="password" id="ha-token" placeholder="eyJ..." autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="pipeline-id">Pipeline ID (optional)</label>
+          <input type="text" id="pipeline-id" placeholder="leave blank for default">
+        </div>
+
+        <div class="form-group">
+          <label for="stt-mode">Speech Recognition</label>
+          <select id="stt-mode">
+            <option value="lg">LG (ThinQ AI — fast)</option>
+            <option value="ha">Home Assistant (Whisper)</option>
+          </select>
+        </div>
+
+        <button id="btn-save" class="btn-primary">Save & Connect</button>
+        <div id="config-status" class="status-msg"></div>
+
+        <div class="oauth-hint">
+          <p class="oauth-hint-label">Or set up from your phone — open this URL:</p>
+          <p id="setup-url" class="oauth-hint-url">—</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main screen -->
+    <div id="screen-main" class="screen">
+      <div class="orb-container">
+        <div id="orb" class="orb idle">
+          <div class="orb-ring"></div>
+          <div class="orb-ring"></div>
+          <div class="orb-inner"></div>
+        </div>
+        <p id="state-label" class="state-label">Press mic button or OK to talk</p>
+      </div>
+
+      <div id="transcript-box" class="transcript-box hidden">
+        <p id="transcript-text"></p>
+      </div>
+
+      <!-- First-run setup notice (hidden once mic button is configured) -->
+      <div id="setup-notice" class="setup-notice hidden">
+        <p class="setup-notice-text">Mic button not configured</p>
+        <button id="btn-setup" class="btn-setup">Enable Mic Button</button>
+        <p id="setup-status" class="setup-status"></p>
+      </div>
+
+      <div class="footer">
+        <span id="conn-indicator" class="conn-dot disconnected"></span>
+        <span id="conn-label">Disconnected</span>
+        <button id="btn-settings" class="btn-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.06 7.06 0 0 0-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.47.47 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.37 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.57 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="bundle.js"></script>
+</body>
+</html>

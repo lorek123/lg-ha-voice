@@ -1,0 +1,1040 @@
+'use strict';
+
+/**
+ * HA Voice – Luna service
+ *
+ * Endpoints:
+ *   /setup            – configures inputhook hold-to-talk keybinds (requires root).
+ *   /isSetupDone      – returns whether the mic button keybind is configured.
+ *   /startSetupServer – starts the OAuth companion HTTP server, returns { url }.
+ *   /stopSetupServer  – shuts down the companion HTTP server.
+ *   /setHAConfig      – store { url, token, pipelineId } for voice pipeline.
+ *   /voice/start      – begin a voice interaction (voiceinput → HA pipeline).
+ *   /voice/stop       – stop recording, let HA finish STT → TTS.
+ *   /voice/abort      – abort immediately, return to idle.
+ *   /voice/state      – return current { state, transcript, ttsUrl }.
+ *
+ * webos-service is provided by the TV's Node.js runtime – do NOT bundle it.
+ */
+
+var Service = require('webos-service');
+var fs      = require('fs');
+var path    = require('path');
+var http    = require('http');
+var https   = require('https');
+var tls     = require('tls');
+var net     = require('net');
+var crypto  = require('crypto');
+
+var os      = require('os');
+var urlLib  = require('url');
+
+var APP_ID      = 'com.homebrew.havoice';
+var SERVICE_ID  = 'com.homebrew.havoice.service';
+var SETUP_PORT  = 8642;
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+var LOG_FILE     = '/tmp/ha-voice-service.log';
+var LOG_MAX_SIZE = 512 * 1024; // 512 KB – rotate when exceeded
+function log() {
+  var ts   = new Date().toISOString().slice(11, 19);
+  var args = Array.prototype.slice.call(arguments);
+  var line = '[' + ts + '] [ha-voice] ' + args.join(' ') + '\n';
+  process.stdout.write(line);
+  try {
+    var stat = fs.statSync(LOG_FILE);
+    if (stat.size > LOG_MAX_SIZE) fs.writeFileSync(LOG_FILE, line);
+    else                          fs.appendFileSync(LOG_FILE, line);
+  } catch (_) { try { fs.appendFileSync(LOG_FILE, line); } catch (_2) {} }
+}
+
+// ── CA bundle (webOS Node has no built-in CA store) ───────────────────────────
+var HBC_CERTS = '/media/developer/apps/usr/palm/services/org.webosbrew.hbchannel.service/certs/cacert-2024-03-11.pem';
+var CA_BUNDLE = null;
+try {
+  var pem = fs.readFileSync(HBC_CERTS, 'utf8');
+  CA_BUNDLE = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+  var orig = tls.createSecureContext;
+  tls.createSecureContext = function(opts) {
+    opts = opts || {};
+    if (!opts.ca) opts.ca = CA_BUNDLE;
+    return orig.call(tls, opts);
+  };
+  log('CA bundle loaded:', CA_BUNDLE.length, 'certs');
+} catch (_) { /* HBChannel not present – HTTPS will fall back to system default */ }
+
+// ── inputhook keybind setup ───────────────────────────────────────────────────
+
+var KEYBINDS_PATH  = '/home/root/.config/lginputhook/keybinds.json';
+var HANDLER_DIR    = '/home/root/.config/lginputhook';
+var HANDLER_SCRIPT = path.join(HANDLER_DIR, 'ha-voice-mic.sh');
+var MIC_KEYCODE    = '428';
+
+// Call the service directly – bypasses applicationManager/launch which does not
+// reliably fire webOSRelaunch in the running WAM app on this TV model.
+var HANDLER_CONTENT = '#!/bin/sh\n'
+  + 'VALUE="$1"\n'
+  + 'if [ "$VALUE" = "1" ]; then\n'
+  + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start \'{}\'\n'
+  + 'elif [ "$VALUE" = "0" ]; then\n'
+  + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/stop \'{}\'\n'
+  + 'fi\n';
+
+function isRoot() {
+  return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+function setupInputHook() {
+  fs.mkdirSync(HANDLER_DIR, { recursive: true });
+  fs.writeFileSync(HANDLER_SCRIPT, HANDLER_CONTENT, { mode: 0o755 });
+
+  var keybinds = {};
+  try { keybinds = JSON.parse(fs.readFileSync(KEYBINDS_PATH, 'utf8')); } catch (_) {}
+  keybinds[MIC_KEYCODE] = { action: 'exec', command: HANDLER_SCRIPT };
+  fs.writeFileSync(KEYBINDS_PATH, JSON.stringify(keybinds, null, 2));
+  log('keybinds configured');
+}
+
+function isSetupDone() {
+  try {
+    var kb = JSON.parse(fs.readFileSync(KEYBINDS_PATH, 'utf8'));
+    var e  = kb[MIC_KEYCODE];
+    return e && e.action === 'exec' && e.command === HANDLER_SCRIPT;
+  } catch (_) { return false; }
+}
+
+function sendToast(svc, message) {
+  svc.call('luna://com.webos.notification/createToast', { sourceId: APP_ID, message: message }, function() {});
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function getLocalIP() {
+  var ip = null;
+  var ifaces = os.networkInterfaces();
+  Object.keys(ifaces).forEach(function(name) {
+    ifaces[name].forEach(function(iface) {
+      if (!iface.internal && iface.family === 'IPv4' && !ip) ip = iface.address;
+    });
+  });
+  return ip;
+}
+
+// ── OAuth companion HTTP server ───────────────────────────────────────────────
+
+var setupServer    = null;
+var pendingOAuth   = null; // { haUrl, state }
+var pendingConfig  = null; // config ready for the app to pick up via /pending-config
+var OAUTH_STATE_FILE = '/tmp/ha-voice-oauth.json';
+
+function savePendingOAuth(obj) {
+  pendingOAuth = obj;
+  try { fs.writeFileSync(OAUTH_STATE_FILE, JSON.stringify(obj)); } catch (_) {}
+}
+
+function loadPendingOAuth() {
+  if (pendingOAuth) return pendingOAuth;
+  try { pendingOAuth = JSON.parse(fs.readFileSync(OAUTH_STATE_FILE, 'utf8')); } catch (_) {}
+  return pendingOAuth;
+}
+
+function clearPendingOAuth() {
+  pendingOAuth = null;
+  try { fs.unlinkSync(OAUTH_STATE_FILE); } catch (_) {}
+}
+
+function httpPost(urlStr, body) {
+  return new Promise(function(resolve, reject) {
+    var url      = urlLib.parse(urlStr);
+    var mod      = url.protocol === 'https:' ? https : http;
+    var postData = body;
+    var req      = mod.request({
+      hostname:           url.hostname,
+      port:               url.port || (url.protocol === 'https:' ? 443 : 80),
+      path:               url.pathname + (url.search || ''),
+      method:             'POST',
+      headers: {
+        'Content-Type':   'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+    }, function(res) {
+      var data = '';
+      res.on('data', function(c) { data += c; });
+      res.on('end', function() {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch (_) { reject(new Error('Bad JSON from HA: ' + data.slice(0, 200))); }
+      });
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+
+function makeHtml(title, body) {
+  return '<!DOCTYPE html><html lang="en"><head>'
+    + '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>' + title + '</title>'
+    + '<style>'
+    + '*{box-sizing:border-box;margin:0;padding:0}'
+    + 'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;'
+    + '  background:#111827;color:#f9fafb;min-height:100vh;display:flex;'
+    + '  align-items:center;justify-content:center;padding:24px}'
+    + '.card{background:#1f2937;border-radius:16px;padding:32px;width:100%;max-width:440px}'
+    + 'h1{color:#60a5fa;font-size:1.6rem;margin-bottom:6px}'
+    + 'p.sub{color:#9ca3af;font-size:.9rem;margin-bottom:28px}'
+    + 'label{display:block;font-size:.8rem;color:#9ca3af;text-transform:uppercase;'
+    + '  letter-spacing:.05em;margin-bottom:6px}'
+    + 'input{width:100%;padding:14px;background:#111827;border:1.5px solid #374151;'
+    + '  border-radius:8px;color:#f9fafb;font-size:1rem;margin-bottom:20px;outline:none}'
+    + 'input:focus{border-color:#60a5fa}'
+    + 'button{width:100%;padding:14px;background:#2563eb;color:#fff;border:none;'
+    + '  border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer}'
+    + 'button:active{background:#1d4ed8}'
+    + '.msg{margin-top:20px;text-align:center;font-size:.95rem}'
+    + '.ok{color:#34d399}.err{color:#f87171}'
+    + '</style></head><body><div class="card">' + body + '</div></body></html>';
+}
+
+var SETUP_PAGE = makeHtml('HA Voice Setup',
+  '<h1>HA Voice</h1>'
+  + '<p class="sub">Connect your LG TV to Home Assistant</p>'
+  + '<form method="POST" action="/start-auth">'
+  + '  <label>Home Assistant URL</label>'
+  + '  <input type="url" name="haUrl" placeholder="http://homeassistant.local:8123" required autocomplete="url">'
+  + '  <button type="submit">Login with Home Assistant &rsaquo;</button>'
+  + '</form>'
+);
+
+function startOAuthServer(clientId) {
+  return new Promise(function(resolve, reject) {
+    if (setupServer) { resolve(); return; }
+
+    var server = http.createServer(function(req, res) {
+      var parsed = urlLib.parse(req.url, true);
+
+      // ── POST /start-auth ──
+      if (req.method === 'POST' && parsed.pathname === '/start-auth') {
+        var body = '';
+        req.on('data', function(c) { body += c; });
+        req.on('end', function() {
+          var haUrl = '';
+          body.split('&').forEach(function(pair) {
+            var kv = pair.split('=');
+            if (decodeURIComponent(kv[0]) === 'haUrl') haUrl = decodeURIComponent(kv[1] || '').replace(/\/$/, '');
+          });
+          if (!haUrl) { res.writeHead(400); res.end('haUrl required'); return; }
+
+          var state  = crypto.randomBytes(8).toString('hex');
+          savePendingOAuth({ haUrl: haUrl, state: state });
+
+          var authUrl = haUrl + '/auth/authorize'
+            + '?client_id='     + encodeURIComponent(clientId)
+            + '&redirect_uri='  + encodeURIComponent(clientId + '/callback')
+            + '&state='         + encodeURIComponent(state)
+            + '&response_type=code';
+
+          res.writeHead(302, { Location: authUrl });
+          res.end();
+        });
+        return;
+      }
+
+      // ── GET /callback ──
+      if (parsed.pathname === '/callback') {
+        var code  = parsed.query.code;
+        var state = parsed.query.state;
+        var pending = loadPendingOAuth();
+
+        if (!code || !pending || pending.state !== state) {
+          var errDetail = 'got=' + state + ' expected=' + (pending ? pending.state : 'NO_PENDING');
+          log('callback state mismatch:', errDetail);
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end(makeHtml('Error', '<p class="msg err">Invalid OAuth state. Please try again.</p><p class="msg" style="font-size:.7rem;opacity:.6">' + errDetail + '</p>'));
+          return;
+        }
+
+        var haUrl = pending.haUrl;
+        clearPendingOAuth();
+
+        var params = 'grant_type=authorization_code'
+          + '&code='         + encodeURIComponent(code)
+          + '&client_id='    + encodeURIComponent(clientId)
+          + '&redirect_uri=' + encodeURIComponent(clientId + '/callback');
+
+        log('callback: exchanging token with', haUrl);
+        httpPost(haUrl + '/auth/token', params)
+          .then(function(r) {
+            var status = r.status;
+            var tokens = r.body;
+            log('token exchange status:', status, 'has_token:', !!tokens.access_token);
+            if (status !== 200 || !tokens.access_token) {
+              throw new Error('Token exchange failed (status ' + status + ')');
+            }
+
+            pendingConfig = {
+              url:          haUrl,
+              token:        tokens.access_token,
+              refreshToken: tokens.refresh_token,
+              clientId:     clientId,
+            };
+            log('OAuth complete, pendingConfig set for', haUrl);
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(makeHtml('Connected!', '<p class="msg ok">Connected! You can close this page.</p>'));
+          })
+          .catch(function(err) {
+            log('token exchange error:', err.message);
+            res.writeHead(500, { 'Content-Type': 'text/html' });
+            res.end(makeHtml('Error', '<p class="msg err">Auth failed: ' + err.message + '</p>'));
+          });
+        return;
+      }
+
+      // ── GET /ip ──
+      if (parsed.pathname === '/ip') {
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end(clientId);
+        return;
+      }
+
+      // ── GET /pending-config ──
+      if (parsed.pathname === '/pending-config') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        if (pendingConfig) {
+          var cfg = pendingConfig;
+          pendingConfig = null;
+          log('pending-config picked up by app');
+          res.end(JSON.stringify(cfg));
+        } else {
+          res.end('null');
+        }
+        return;
+      }
+
+      // ── GET /voice-state – browser app polls this for UI updates ──
+      if (parsed.pathname === '/voice-state') {
+        var tts = voiceTtsUrl;
+        if (tts) voiceTtsUrl = '';   // deliver once
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({
+          state:      voiceState,
+          transcript: voiceTranscript,
+          ttsUrl:     tts,
+        }));
+        return;
+      }
+
+      // ── GET / ──
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(SETUP_PAGE);
+    });
+
+    server.on('error', reject);
+    server.listen(SETUP_PORT, '0.0.0.0', function() {
+      setupServer = server;
+      log('Setup server listening on port', SETUP_PORT);
+      resolve();
+    });
+  });
+}
+
+// ── Minimal WebSocket client (Node 0.12 compatible) ───────────────────────────
+//
+// Sends masked client→server frames; parses unmasked server→client frames.
+// Only handles text (opcode 0x01) and binary (0x02) frames; responds to ping.
+
+function wsConnect(wsUrl, onMessage, onError, onClose) {
+  var parsed    = urlLib.parse(wsUrl);
+  var isSecure  = parsed.protocol === 'wss:';
+  var port      = parseInt(parsed.port) || (isSecure ? 443 : 80);
+  var host      = parsed.hostname;
+  var reqPath   = (parsed.pathname || '/') + (parsed.search || '');
+  var wsKey     = crypto.randomBytes(16).toString('base64');
+
+  var handshake = 'GET ' + reqPath + ' HTTP/1.1\r\n'
+    + 'Host: ' + host + ':' + port + '\r\n'
+    + 'Upgrade: websocket\r\n'
+    + 'Connection: Upgrade\r\n'
+    + 'Sec-WebSocket-Key: ' + wsKey + '\r\n'
+    + 'Sec-WebSocket-Version: 13\r\n'
+    + '\r\n';
+
+  var connectOpts = isSecure
+    ? { host: host, port: port, ca: CA_BUNDLE, rejectUnauthorized: !!CA_BUNDLE }
+    : { host: host, port: port };
+
+  var socket   = (isSecure ? tls : net).connect(connectOpts, function() {
+    socket.write(handshake);
+  });
+
+  var buf      = new Buffer(0);
+  var upgraded = false;
+  var closed   = false;
+
+  socket.on('data', function(chunk) {
+    buf = Buffer.concat([buf, chunk]);
+    if (!upgraded) {
+      // Find end of HTTP response headers (\r\n\r\n)
+      var idx = -1;
+      for (var i = 0; i < buf.length - 3; i++) {
+        if (buf[i] === 13 && buf[i+1] === 10 && buf[i+2] === 13 && buf[i+3] === 10) {
+          idx = i; break;
+        }
+      }
+      if (idx === -1) return;
+      upgraded = true;
+      buf = buf.slice(idx + 4);
+    }
+    parseFrames();
+  });
+
+  function parseFrames() {
+    while (buf.length >= 2) {
+      var opcode     = buf[0] & 0x0f;
+      var masked     = (buf[1] & 0x80) !== 0;
+      var payloadLen = buf[1] & 0x7f;
+      var off        = 2;
+
+      if (payloadLen === 126) {
+        if (buf.length < 4) return;
+        payloadLen = buf.readUInt16BE(2);
+        off        = 4;
+      } else if (payloadLen === 127) {
+        if (buf.length < 10) return;
+        // Only handle messages < 4 GB (lower 32 bits)
+        payloadLen = buf.readUInt32BE(6);
+        off        = 10;
+      }
+
+      var totalLen = off + (masked ? 4 : 0) + payloadLen;
+      if (buf.length < totalLen) return;
+
+      var maskKey = null;
+      if (masked) { maskKey = buf.slice(off, off + 4); off += 4; }
+
+      var payload = new Buffer(payloadLen);
+      buf.copy(payload, 0, off, off + payloadLen);
+      if (masked) {
+        for (var i = 0; i < payload.length; i++) payload[i] ^= maskKey[i % 4];
+      }
+      buf = buf.slice(off + payloadLen);
+
+      if (opcode === 0x01 || opcode === 0x02) {
+        try { onMessage(payload.toString('utf8')); } catch (_) {}
+      } else if (opcode === 0x08) {
+        socket.destroy();
+        if (!closed) { closed = true; onClose(); }
+        return;
+      } else if (opcode === 0x09) {
+        // Ping → Pong
+        wsSend(0x0A, payload);
+      }
+    }
+  }
+
+  function wsSend(opcode, payload) {
+    var maskKey = crypto.randomBytes(4);
+    var payLen  = payload.length;
+    var hdrLen  = 2 + 4 + (payLen < 126 ? 0 : payLen < 65536 ? 2 : 8);
+    var frame   = new Buffer(hdrLen + payLen);
+    frame[0] = 0x80 | opcode;
+    var off  = 1;
+    if (payLen < 126) {
+      frame[off++] = 0x80 | payLen;
+    } else if (payLen < 65536) {
+      frame[off++] = 0x80 | 126;
+      frame.writeUInt16BE(payLen, off); off += 2;
+    } else {
+      frame[off++] = 0x80 | 127;
+      frame.writeUInt32BE(0,      off); off += 4;
+      frame.writeUInt32BE(payLen, off); off += 4;
+    }
+    maskKey.copy(frame, off); off += 4;
+    for (var i = 0; i < payLen; i++) frame[off + i] = payload[i] ^ maskKey[i % 4];
+    socket.write(frame);
+  }
+
+  socket.on('error', function(err) {
+    log('WS socket error:', err.message);
+    if (!closed) { closed = true; onError(err.message); }
+  });
+  socket.on('close', function() {
+    if (!closed) { closed = true; onClose(); }
+  });
+
+  return {
+    send: function(data) {
+      var payload = new Buffer(String(data), 'utf8');
+      wsSend(0x01, payload);
+    },
+    close: function() {
+      socket.destroy();
+    },
+  };
+}
+
+// ── Voice pipeline state ──────────────────────────────────────────────────────
+
+var STT_MODE = { LG: 'lg', HA: 'ha' };
+
+var voiceState      = 'idle';   // idle | listening | processing | speaking | error
+var voiceTranscript = '';
+var voiceTtsUrl     = '';
+var voiceHAConfig   = null;     // { url, token, pipelineId, sttMode }
+var voiceWS         = null;     // active HA WebSocket (STT or text pipeline)
+var voiceSocket     = null;     // Unix socket to voiceinput
+var voiceSub        = null;     // voiceinput luna subscription handle
+var voiceMsgId      = 1;
+
+// Persist HA config so mic button works without the app being open first.
+var HA_CONFIG_FILE = '/tmp/ha-voice-ha-config.json';
+try {
+  voiceHAConfig = JSON.parse(fs.readFileSync(HA_CONFIG_FILE, 'utf8'));
+  log('Loaded HA config for:', voiceHAConfig.url);
+} catch (_) {}
+
+function setVoiceState(s) {
+  if (voiceState === s) return;
+  log('voice state:', voiceState, '->', s);
+  voiceState = s;
+}
+
+function voiceCleanup() {
+  if (voiceSocket) { try { voiceSocket.destroy(); } catch (_) {} voiceSocket = null; }
+  if (voiceSub)    { try { voiceSub.cancel();     } catch (_) {} voiceSub    = null; }
+  if (voiceWS)     { try { voiceWS.close();       } catch (_) {} voiceWS     = null; }
+}
+
+// Transition to error then auto-recover to idle after 3 s.
+function setVoiceError(reason) {
+  log('voice error:', reason);
+  voiceCleanup();
+  setVoiceState('error');
+  setTimeout(function() { if (voiceState === 'error') setVoiceState('idle'); }, 3000);
+}
+
+// ── Voice pipeline ────────────────────────────────────────────────────────────
+
+/**
+ * Decode a JWT payload without verification (we trust HA tokens).
+ * Returns the payload object, or null if malformed.
+ */
+function jwtPayload(token) {
+  try {
+    var parts = token.split('.');
+    if (parts.length < 2) return null;
+    var pad = parts[1];
+    while (pad.length % 4) pad += '=';
+    return JSON.parse(new Buffer(pad, 'base64').toString('utf8'));
+  } catch (_) { return null; }
+}
+
+/**
+ * Ensure voiceHAConfig.token is valid (not expired / expiring within 60 s).
+ * Returns a Promise that resolves when the token is ready.
+ */
+function ensureFreshToken() {
+  var cfg = voiceHAConfig;
+  var payload = jwtPayload(cfg.token);
+  var nowSec = Date.now() / 1000;
+  if (payload && payload.exp && payload.exp - nowSec > 60) {
+    return Promise.resolve(); // token still good
+  }
+  if (!cfg.refreshToken || !cfg.clientId) {
+    return Promise.reject(new Error('token expired and no refresh credentials'));
+  }
+  log('token near expiry, refreshing…');
+  var body = 'grant_type=refresh_token'
+    + '&refresh_token=' + encodeURIComponent(cfg.refreshToken)
+    + '&client_id='     + encodeURIComponent(cfg.clientId);
+  return httpPost(cfg.url + '/auth/token', body).then(function(res) {
+    if (res.status !== 200 || !res.body.access_token) {
+      throw new Error('token refresh HTTP ' + res.status);
+    }
+    log('token refreshed OK');
+    cfg.token = res.body.access_token;
+    voiceHAConfig = cfg;
+    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(cfg)); } catch (_) {}
+  });
+}
+
+function startVoicePipeline() {
+  if (!voiceHAConfig || !voiceHAConfig.url || !voiceHAConfig.token) {
+    setVoiceError('no HA config stored');
+    return;
+  }
+
+  ensureFreshToken().then(function() {
+    doStartVoicePipeline();
+  }).catch(function(err) {
+    setVoiceError('token refresh failed: ' + err.message);
+  });
+}
+
+function doStartVoicePipeline() {
+  var wsUrl = voiceHAConfig.url.replace(/^http/, 'ws') + '/api/websocket';
+  log('connecting to HA WS:', wsUrl);
+
+  var runId = voiceMsgId++;
+  voiceWS = wsConnect(
+    wsUrl,
+    function onMsg(data) {
+      var msg;
+      try { msg = JSON.parse(data); } catch (_) { return; }
+
+      if (msg.type === 'auth_required') {
+        voiceWS.send(JSON.stringify({ type: 'auth', access_token: voiceHAConfig.token }));
+
+      } else if (msg.type === 'auth_ok') {
+        log('HA WS auth ok, starting pipeline');
+        var startMsg = {
+          id:          runId,
+          type:        'assist_pipeline/run',
+          start_stage: 'stt',
+          end_stage:   'tts',
+          input:       { sample_rate: 16000 },
+        };
+        if (voiceHAConfig.pipelineId) startMsg.pipeline = voiceHAConfig.pipelineId;
+        voiceWS.send(JSON.stringify(startMsg));
+
+      } else if (msg.type === 'auth_invalid') {
+        setVoiceError('HA auth invalid: ' + msg.message);
+
+      } else if (msg.type === 'result' && msg.id === runId) {
+        if (msg.success) {
+          log('pipeline started, connecting voiceinput');
+          startVoiceInput();
+        } else {
+          var errMsg = msg.error && msg.error.message ? msg.error.message : 'pipeline start failed';
+          setVoiceError(errMsg);
+        }
+
+      } else if (msg.type === 'event' && msg.id === runId) {
+        handlePipelineEvent(msg.event);
+      }
+    },
+    function onErr(err) {
+      setVoiceError('HA WS error: ' + err);
+    },
+    function onClose() {
+      log('HA WS closed');
+      if (voiceState !== 'idle') {
+        voiceCleanup();
+        setVoiceState('idle');
+      }
+    }
+  );
+}
+
+function handlePipelineEvent(evt) {
+  if (!evt) return;
+  log('pipeline event:', evt.type);
+  if (evt.type === 'stt-end') {
+    voiceTranscript = (evt.data && evt.data.stt_output && evt.data.stt_output.text) || '';
+    log('transcript:', voiceTranscript);
+    setVoiceState('processing');
+
+  } else if (evt.type === 'tts-start') {
+    var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
+    log('tts-start url:', url);
+    voiceTtsUrl = url;
+    setVoiceState('speaking');
+
+  } else if (evt.type === 'error') {
+    setVoiceError((evt.data && evt.data.message) || 'pipeline error');
+
+  } else if (evt.type === 'run-end') {
+    log('pipeline run-end');
+    voiceCleanup();
+    setVoiceState('idle');
+  }
+}
+
+function startVoiceInput() {
+  log('calling voiceinput/startStreaming');
+  service.call(
+    'luna://com.webos.service.voiceinput/startStreaming',
+    { deviceType: 'remote', subscribe: true },
+    function(msg) {
+      var p = msg.payload;
+      log('voiceinput response:', JSON.stringify(p).slice(0, 120));
+
+      if (p.returnValue && p.socketPath && !voiceSocket) {
+        log('voiceinput socket path:', p.socketPath);
+        connectToAudioSocket(p.socketPath);
+        voiceSub = msg; // store handle for cancel
+
+      } else if (p.state === 'voice stop' && voiceState === 'listening') {
+        log('voiceinput VAD: voice stop – auto sending stt_stream/end');
+        doStopListening();
+
+      } else if (p.returnValue === false) {
+        setVoiceError('voiceinput: ' + (p.errorText || 'unknown'));
+      }
+    }
+  );
+}
+
+function connectToAudioSocket(socketPath) {
+  var sock = net.createConnection(socketPath);
+  voiceSocket = sock;
+
+  sock.on('connect', function() {
+    log('connected to voiceinput audio socket');
+  });
+
+  sock.on('data', function(chunk) {
+    if (voiceState !== 'listening' || !voiceWS) return;
+    // Stream raw PCM to HA as base64-encoded stt_stream/append
+    voiceWS.send(JSON.stringify({
+      type: 'assist_pipeline/stt_stream/append',
+      data: chunk.toString('base64'),
+    }));
+  });
+
+  sock.on('error', function(err) {
+    log('voiceSocket error:', err.message);
+  });
+
+  sock.on('close', function() {
+    log('voiceSocket closed');
+    if (voiceSocket === sock) voiceSocket = null;
+  });
+}
+
+function doStopListening() {
+  if (voiceSocket) { voiceSocket.destroy(); voiceSocket = null; }
+  if (voiceSub)    { try { voiceSub.cancel(); } catch (_) {} voiceSub = null; }
+  setVoiceState('processing');
+  if (voiceWS) {
+    voiceWS.send(JSON.stringify({ type: 'assist_pipeline/stt_stream/end' }));
+    log('sent stt_stream/end');
+  }
+}
+
+// ── Service registration ───────────────────────────────────────────────────────
+
+var service = new Service(SERVICE_ID);
+
+// Disable the idle timer – keep the process alive for HTTP server + voice pipeline.
+service.activityManager._stopTimer();
+service.activityManager._startTimer = function() {};
+
+service.register('isSetupDone', function(message) {
+  message.respond({ returnValue: true, done: isSetupDone() });
+});
+
+service.register('setup', function(message) {
+  log('setup called, root:', isRoot());
+  if (!isRoot()) {
+    if (!isSetupDone()) sendToast(service, 'HA Voice: open the app to configure mic button.');
+    message.respond({ returnValue: true, root: false });
+    return;
+  }
+  try {
+    setupInputHook();
+    message.respond({ returnValue: true, root: true });
+  } catch (err) {
+    message.respond({ returnValue: false, errorText: err.message });
+  }
+});
+
+/**
+ * /setHAConfig – browser app calls this after connecting to HA so the service
+ * can run the voice pipeline on behalf of the mic button.
+ */
+service.register('setHAConfig', function(message) {
+  var p = message.payload;
+  if (p && p.url && p.token) {
+    voiceHAConfig = {
+      url:          p.url,
+      token:        p.token,
+      pipelineId:   p.pipelineId   || '',
+      refreshToken: p.refreshToken || '',
+      clientId:     p.clientId     || '',
+      sttMode:      p.sttMode      || STT_MODE.LG,
+    };
+    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(voiceHAConfig)); } catch (_) {}
+    log('HA config updated for:', voiceHAConfig.url);
+  }
+  message.respond({ returnValue: true });
+});
+
+/**
+ * /voice/start – begin voice interaction (called by inputhook or browser app).
+ */
+service.register('voice/start', function(message) {
+  message.respond({ returnValue: true });
+  log('voice/start, state=' + voiceState);
+  if (voiceState !== 'idle' && voiceState !== 'error') {
+    log('voice/start: already active, ignoring');
+    return;
+  }
+  voiceTranscript = '';
+  voiceTtsUrl     = '';
+  setVoiceState('listening');
+  var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
+  if (sttMode === STT_MODE.HA) {
+    // HA Whisper STT pipeline (audio → STT → intent → TTS).
+    startVoicePipeline();
+  } else {
+    // LG ThinQ AI STT via voiceconductor (result arrives via interactor subscription).
+    service.call(
+      'luna://com.webos.service.voiceconductor/recognizeVoice',
+      {},
+      function(msg) {
+        var p = msg.payload;
+        log('recognizeVoice response:', JSON.stringify(p).slice(0, 120));
+        if (!p.returnValue) {
+          log('voiceconductor unavailable, falling back to HA STT pipeline');
+          startVoicePipeline();
+        } else {
+          // recognizeVoice returns text directly in the response.
+          var text = (p.text && p.text[0]) || '';
+          log('[vc] recognizeVoice text:', JSON.stringify(text));
+          if (text) {
+            voiceTranscript = text;
+            setVoiceState('processing');
+            runHATextPipeline(text);
+          } else {
+            setVoiceState('idle');
+          }
+        }
+      }
+    );
+  }
+});
+
+/**
+ * /voice/stop – stop recording and let HA finish STT → TTS.
+ */
+service.register('voice/stop', function(message) {
+  message.respond({ returnValue: true });
+  log('voice/stop, state=' + voiceState);
+  if (voiceState !== 'listening') return;
+  doStopListening();
+});
+
+/**
+ * /voice/abort – cancel immediately and return to idle.
+ */
+service.register('voice/abort', function(message) {
+  message.respond({ returnValue: true });
+  log('voice/abort');
+  voiceCleanup();
+  setVoiceState('idle');
+});
+
+/**
+ * /voice/state – browser app polls this to update UI.
+ * Returns { state, transcript, ttsUrl }.
+ * ttsUrl is delivered once then cleared.
+ */
+service.register('voice/state', function(message) {
+  var tts = voiceTtsUrl;
+  if (tts) voiceTtsUrl = '';
+  message.respond({
+    returnValue: true,
+    state:       voiceState,
+    transcript:  voiceTranscript,
+    ttsUrl:      tts,
+  });
+});
+
+/**
+ * /startSetupServer – start OAuth companion HTTP server, return { url }.
+ */
+service.register('startSetupServer', function(message) {
+  var ip = getLocalIP();
+  if (!ip) {
+    message.respond({ returnValue: false, errorText: 'Could not determine TV IP address' });
+    return;
+  }
+
+  var clientId = 'http://' + ip + ':' + SETUP_PORT;
+  message.respond({ returnValue: true, url: clientId });
+
+  startOAuthServer(clientId).catch(function(err) {
+    log('startOAuthServer error:', err.message);
+  });
+});
+
+/**
+ * /stopSetupServer – shut down the companion HTTP server.
+ */
+service.register('stopSetupServer', function(message) {
+  if (setupServer) {
+    setupServer.close();
+    setupServer = null;
+    clearPendingOAuth();
+  }
+  message.respond({ returnValue: true });
+});
+
+log('Service started (PID ' + process.pid + ', root: ' + isRoot() + ')');
+
+// ── voiceconductor interactor ─────────────────────────────────────────────────
+// Registers as a voiceconductor interactor so we can intercept the result of LG's
+// native voice recognition and forward the text to HA's conversation pipeline.
+// This fires when the user uses the Magic Remote mic button without our inputhook
+// intercepting it (or if voiceconductor triggers independently).
+
+function startVcInteractor() {
+  service.call(
+    'luna://com.webos.service.voiceconductor/interactor/register',
+    { subscribe: true, type: 'foreground' },
+    function(msg) {
+      handleVcEvent(msg.payload);
+    }
+  );
+  log('[vc] registered as interactor');
+}
+
+function handleVcEvent(p) {
+  if (!p || !p.command) return;
+  log('[vc] event cmd=' + p.command + ' ticket=' + (p.voiceTicket || '') +
+      ' action=' + JSON.stringify(p.action || null).slice(0, 200));
+
+  var cmd    = p.command;
+  var ticket = p.voiceTicket;
+
+  if (cmd === 'setContext') {
+    // We don't claim context – let the native system handle it.
+    vcReportResult(ticket, false, {});
+
+  } else if (cmd === 'performAction') {
+    handleVcPerformAction(ticket, p.action);
+  }
+}
+
+function vcReportResult(ticket, result, feedback) {
+  service.call(
+    'luna://com.webos.service.voiceconductor/interactor/reportActionResult',
+    { voiceTicket: ticket, result: !!result, feedback: feedback || {} },
+    function(msg) {
+      log('[vc] reportActionResult:', JSON.stringify(msg.payload));
+    }
+  );
+}
+
+/**
+ * Try to extract the recognized text from whatever NLP result structure
+ * voiceconductor sends.  We log the full action first so we can refine this.
+ */
+function extractVcText(action) {
+  if (!action) return '';
+  return action.displayString
+      || action.utterance
+      || action.text
+      || action.sttResult
+      || action.recognized
+      || (action.nlpResult && (action.nlpResult.displayString || action.nlpResult.utterance))
+      || '';
+}
+
+function handleVcPerformAction(ticket, action) {
+  var text = extractVcText(action);
+  log('[vc] performAction text=' + JSON.stringify(text) +
+      ' fullAction=' + JSON.stringify(action || null).slice(0, 400));
+
+  if (!text || !voiceHAConfig) {
+    // Can't handle – let native proceed.
+    vcReportResult(ticket, false, {});
+    return;
+  }
+
+  // Claim the action so native handlers don't also fire.
+  vcReportResult(ticket, true, {});
+  voiceTranscript = text;
+  setVoiceState('processing');
+  runHATextPipeline(text);
+}
+
+/**
+ * Run HA's assist_pipeline starting from the intent stage (skipping STT) with
+ * the recognized text.  This executes the HA intent and returns TTS audio.
+ */
+function runHATextPipeline(text) {
+  if (!voiceHAConfig) { setVoiceError('no HA config'); return; }
+  ensureFreshToken().then(function() {
+    var wsUrl = voiceHAConfig.url.replace(/^http/, 'ws') + '/api/websocket';
+    log('[vc] HA text pipeline for:', JSON.stringify(text));
+    var runId = voiceMsgId++;
+
+    // Assign to voiceWS so voiceCleanup() can close it if needed.
+    voiceWS = wsConnect(
+      wsUrl,
+      function onMsg(data) {
+        var msg;
+        try { msg = JSON.parse(data); } catch (_) { return; }
+
+        if (msg.type === 'auth_required') {
+          voiceWS.send(JSON.stringify({ type: 'auth', access_token: voiceHAConfig.token }));
+
+        } else if (msg.type === 'auth_ok') {
+          var startMsg = {
+            id:          runId,
+            type:        'assist_pipeline/run',
+            start_stage: 'intent',
+            end_stage:   'tts',
+            input:       { text: text },
+          };
+          if (voiceHAConfig.pipelineId) startMsg.pipeline = voiceHAConfig.pipelineId;
+          voiceWS.send(JSON.stringify(startMsg));
+
+        } else if (msg.type === 'auth_invalid') {
+          setVoiceError('[vc] HA auth invalid');
+
+        } else if (msg.type === 'result' && msg.id === runId && !msg.success) {
+          setVoiceError('[vc] pipeline failed: ' + (msg.error && msg.error.message || ''));
+
+        } else if (msg.type === 'event' && msg.id === runId) {
+          var evt = msg.event;
+          if (!evt) return;
+          log('[vc] pipeline evt:', evt.type);
+
+          if (evt.type === 'tts-start') {
+            var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
+            log('[vc] tts url:', url);
+            if (url) { voiceTtsUrl = url; setVoiceState('speaking'); }
+
+          } else if (evt.type === 'error') {
+            setVoiceError('[vc] ' + (evt.data && evt.data.message || 'pipeline error'));
+
+          } else if (evt.type === 'run-end') {
+            voiceCleanup();
+            if (voiceState !== 'speaking') setVoiceState('idle');
+          }
+        }
+      },
+      function onErr(e) {
+        log('[vc] HA WS error:', e);
+        setVoiceError('[vc] WS error');
+      },
+      function onClose() {
+        log('[vc] HA WS closed');
+        if (voiceState === 'processing') setVoiceState('idle');
+      }
+    );
+  }).catch(function(err) {
+    log('[vc] token error:', err.message);
+    setVoiceError('token error: ' + err.message);
+  });
+}
+
+startVcInteractor();
+
+// Auto-start HTTP server to keep event loop alive and allow /pending-config polling.
+(function() {
+  var ip = getLocalIP();
+  if (ip) {
+    var clientId = 'http://' + ip + ':' + SETUP_PORT;
+    startOAuthServer(clientId).then(function() {
+      log('Setup server auto-started at', clientId);
+    }).catch(function(err) {
+      log('Setup server auto-start failed:', err.message);
+    });
+  }
+}());

@@ -1,0 +1,9 @@
+{
+  "id": "com.homebrew.havoice.service",
+  "description": "HA Voice – Magic Remote hold-to-talk service",
+  "services": [
+    {
+      "name": "com.homebrew.havoice.service"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "com.homebrew.havoice",
+  "version": "1.0.0",
+  "vendor": "homebrew",
+  "type": "web",
+  "main": "index.html",
+  "title": "HA Voice",
+  "appDescription": "Home Assistant Voice Satellite",
+  "icon": "assets/icon.png",
+  "largeIcon": "assets/icon-large.png",
+  "iconColor": "#03A9F4",
+  "splashBackground": "assets/splash.png",
+  "inspectable": true,
+  "handlesRelaunch": true,
+  "allowAudioCapture": true,
+  "requiredPermissions": [
+    "audio.operation",
+    "audio.query"
+  ],
+  "previewMetadata": {
+    "targetEndpoint": "luna://com.homebrew.havoice.service/setup",
+    "sourceEndpoint": "@PREVIEW.ENDPOINT.SOURCE_LOCAL_STOREAPP"
+  }
+}

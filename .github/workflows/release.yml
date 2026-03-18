@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Install build tools
+        run: |
+          sudo apt-get install -y imagemagick
+          npm install -g @webos-tools/cli
+
+      - name: Stamp version from tag into appinfo.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            const info = JSON.parse(fs.readFileSync('appinfo.json', 'utf8'));
+            info.version = '$VERSION';
+            fs.writeFileSync('appinfo.json', JSON.stringify(info, null, 2) + '\n');
+          "
+
+      - name: Build IPK
+        run: npm run build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.ipk'
+          generate_release_notes: true
+          fail_on_unmatched_files: true

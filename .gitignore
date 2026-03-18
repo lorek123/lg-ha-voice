@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.ipk
+
+# Lock file (TV-side Node is pinned; lock adds noise without value)
+package-lock.json
+
+# Developer tooling / local environment
+.claude/
+
+# Reverse engineering workspace (not part of the app)
+ghidra/
+reverse/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
