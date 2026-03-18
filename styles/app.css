@@ -345,6 +345,69 @@ html, body {
   outline: none;
 }
 
+/* Recording overlay */
+.recording-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 13, 26, 0.88);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.recording-overlay.active {
+  opacity: 1;
+}
+
+.rec-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 36px;
+}
+
+.rec-waveform {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 96px;
+}
+
+.rec-bar {
+  display: block;
+  width: 10px;
+  border-radius: 5px;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+  animation: rec-wave 1.1s ease-in-out infinite;
+}
+
+/* Heights create a symmetric bell shape */
+.rec-bar:nth-child(1) { height: 18px; animation-delay: 0.00s; }
+.rec-bar:nth-child(2) { height: 36px; animation-delay: 0.10s; }
+.rec-bar:nth-child(3) { height: 58px; animation-delay: 0.20s; }
+.rec-bar:nth-child(4) { height: 80px; animation-delay: 0.30s; }
+.rec-bar:nth-child(5) { height: 58px; animation-delay: 0.20s; }
+.rec-bar:nth-child(6) { height: 36px; animation-delay: 0.10s; }
+.rec-bar:nth-child(7) { height: 18px; animation-delay: 0.00s; }
+
+@keyframes rec-wave {
+  0%, 100% { transform: scaleY(0.35); opacity: 0.5; }
+  50%       { transform: scaleY(1.00); opacity: 1.0; }
+}
+
+.rec-label {
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+
 /* First-run setup notice */
 .setup-notice {
   position: fixed;

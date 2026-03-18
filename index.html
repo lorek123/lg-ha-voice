@@ -62,6 +62,22 @@
         <p id="transcript-text"></p>
       </div>
 
+      <!-- Recording overlay – shown while mic is active -->
+      <div id="recording-overlay" class="recording-overlay">
+        <div class="rec-content">
+          <div class="rec-waveform" aria-hidden="true">
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+            <span class="rec-bar"></span>
+          </div>
+          <p class="rec-label">Listening…</p>
+        </div>
+      </div>
+
       <!-- First-run setup notice (hidden once mic button is configured) -->
       <div id="setup-notice" class="setup-notice hidden">
         <p class="setup-notice-text">Mic button not configured</p>

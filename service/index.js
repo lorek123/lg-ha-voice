@@ -791,13 +791,14 @@ service.register('voice/start', function(message) {
           log('voiceconductor unavailable, falling back to HA STT pipeline');
           startVoicePipeline();
         } else {
-          // recognizeVoice returns text directly in the response.
-          var text = (p.text && p.text[0]) || '';
-          log('[vc] recognizeVoice text:', JSON.stringify(text));
-          if (text) {
-            voiceTranscript = text;
+          // recognizeVoice returns a ranked list of candidates.
+          // Try each in sequence: the first that HA's intent engine accepts wins.
+          var candidates = (p.text || []).filter(Boolean);
+          log('[vc] recognizeVoice candidates:', JSON.stringify(candidates));
+          if (candidates.length > 0) {
+            voiceTranscript = candidates[0];
             setVoiceState('processing');
-            runHATextPipeline(text);
+            runHATextPipelineWithFallback(candidates);
           } else {
             setVoiceState('idle');
           }
@@ -953,25 +954,56 @@ function handleVcPerformAction(ticket, action) {
 }
 
 /**
- * Run HA's assist_pipeline starting from the intent stage (skipping STT) with
- * the recognized text.  This executes the HA intent and returns TTS audio.
+ * Try each LG STT candidate against HA's intent engine in sequence.
+ * The first candidate whose intent-end response_type is not "error" wins.
+ * If all candidates fail, state returns to idle.
  */
-function runHATextPipeline(text) {
+function runHATextPipelineWithFallback(candidates) {
+  var text = candidates[0];
+  var rest = candidates.slice(1);
+  log('[vc] trying candidate:', JSON.stringify(text), '(' + rest.length + ' remaining)');
+  voiceTranscript = text;
+
+  runHATextPipeline(text, function onIntentResult(matched) {
+    if (!matched && rest.length > 0) {
+      log('[vc] candidate unmatched, trying next');
+      runHATextPipelineWithFallback(rest);
+    } else if (!matched) {
+      log('[vc] all candidates exhausted, no match');
+      setVoiceState('idle');
+    }
+    // matched = true: pipeline continues naturally to tts-start / run-end
+  });
+}
+
+/**
+ * Run HA's assist_pipeline starting from the intent stage (skipping STT).
+ * onIntentResult(matched: bool) is called when intent-end is received so the
+ * caller can decide whether to try the next candidate.
+ */
+function runHATextPipeline(text, onIntentResult) {
   if (!voiceHAConfig) { setVoiceError('no HA config'); return; }
   ensureFreshToken().then(function() {
     var wsUrl = voiceHAConfig.url.replace(/^http/, 'ws') + '/api/websocket';
     log('[vc] HA text pipeline for:', JSON.stringify(text));
-    var runId = voiceMsgId++;
+    var runId   = voiceMsgId++;
+    var localWS = null;       // ref to this specific WS so onClose can guard
+    var intentDone = false;   // fire onIntentResult only once
 
-    // Assign to voiceWS so voiceCleanup() can close it if needed.
-    voiceWS = wsConnect(
+    function signalIntent(matched) {
+      if (intentDone) return;
+      intentDone = true;
+      if (onIntentResult) onIntentResult(matched);
+    }
+
+    localWS = voiceWS = wsConnect(
       wsUrl,
       function onMsg(data) {
         var msg;
         try { msg = JSON.parse(data); } catch (_) { return; }
 
         if (msg.type === 'auth_required') {
-          voiceWS.send(JSON.stringify({ type: 'auth', access_token: voiceHAConfig.token }));
+          localWS.send(JSON.stringify({ type: 'auth', access_token: voiceHAConfig.token }));
 
         } else if (msg.type === 'auth_ok') {
           var startMsg = {
@@ -982,12 +1014,14 @@ function runHATextPipeline(text) {
             input:       { text: text },
           };
           if (voiceHAConfig.pipelineId) startMsg.pipeline = voiceHAConfig.pipelineId;
-          voiceWS.send(JSON.stringify(startMsg));
+          localWS.send(JSON.stringify(startMsg));
 
         } else if (msg.type === 'auth_invalid') {
+          signalIntent(false);
           setVoiceError('[vc] HA auth invalid');
 
         } else if (msg.type === 'result' && msg.id === runId && !msg.success) {
+          signalIntent(false);
           setVoiceError('[vc] pipeline failed: ' + (msg.error && msg.error.message || ''));
 
         } else if (msg.type === 'event' && msg.id === runId) {
@@ -995,15 +1029,33 @@ function runHATextPipeline(text) {
           if (!evt) return;
           log('[vc] pipeline evt:', evt.type);
 
-          if (evt.type === 'tts-start') {
+          if (evt.type === 'intent-end') {
+            // response_type: 'action_done' | 'query_answer' = matched
+            //                'error'                         = no intent found
+            var intentOut    = evt.data && evt.data.intent_output;
+            var responseType = intentOut && intentOut.response && intentOut.response.response_type;
+            var matched      = responseType !== 'error';
+            log('[vc] intent-end response_type:', responseType, '→', matched ? 'matched' : 'no match');
+            signalIntent(matched);
+
+            if (!matched) {
+              // Close this WS cleanly; caller will try the next candidate.
+              // Null voiceWS first so onClose won't see it as the active pipeline.
+              voiceWS = null;
+              localWS.close();
+            }
+
+          } else if (evt.type === 'tts-start') {
             var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
             log('[vc] tts url:', url);
             if (url) { voiceTtsUrl = url; setVoiceState('speaking'); }
 
           } else if (evt.type === 'error') {
+            signalIntent(false);
             setVoiceError('[vc] ' + (evt.data && evt.data.message || 'pipeline error'));
 
           } else if (evt.type === 'run-end') {
+            signalIntent(true);
             voiceCleanup();
             if (voiceState !== 'speaking') setVoiceState('idle');
           }
@@ -1011,15 +1063,19 @@ function runHATextPipeline(text) {
       },
       function onErr(e) {
         log('[vc] HA WS error:', e);
+        signalIntent(false);
         setVoiceError('[vc] WS error');
       },
       function onClose() {
         log('[vc] HA WS closed');
-        if (voiceState === 'processing') setVoiceState('idle');
+        // Only reset state when this socket is still the active pipeline.
+        // If we nulled voiceWS to switch candidates, leave state alone.
+        if (voiceWS === localWS && voiceState === 'processing') setVoiceState('idle');
       }
     );
   }).catch(function(err) {
     log('[vc] token error:', err.message);
+    if (onIntentResult) onIntentResult(false);
     setVoiceError('token error: ' + err.message);
   });
 }

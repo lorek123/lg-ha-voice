@@ -90,11 +90,12 @@ const transcriptBox = $('transcript-box');
 const transcriptText = $('transcript-text');
 const connIndicator = $('conn-indicator');
 const connLabel     = $('conn-label');
-const btnSettings   = $('btn-settings');
-const setupNotice   = $('setup-notice');
-const btnSetup      = $('btn-setup');
-const setupStatus   = $('setup-status');
-const setupUrl      = $('setup-url');
+const btnSettings      = $('btn-settings');
+const setupNotice      = $('setup-notice');
+const btnSetup         = $('btn-setup');
+const setupStatus      = $('setup-status');
+const setupUrl         = $('setup-url');
+const recordingOverlay = $('recording-overlay');
 
 // ── App state ──────────────────────────────────────────────────────────────────
 let haClient = null;
@@ -418,6 +419,7 @@ const STATE_LABELS = {
 function setOrbState(state) {
   orb.className = `orb ${state}`;
   stateLabel.textContent = STATE_LABELS[state] ?? '';
+  recordingOverlay.classList.toggle('active', state === SvcState.LISTENING);
 
   if (state === SvcState.IDLE || state === SvcState.ERROR) {
     setTimeout(() => hideTranscript(), state === SvcState.IDLE ? 4000 : 0);
