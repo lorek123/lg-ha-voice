@@ -345,67 +345,126 @@ html, body {
   outline: none;
 }
 
-/* Recording overlay */
-.recording-overlay {
+/* Voice overlay – appears over any foreground app during voice interaction */
+.voice-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(13, 13, 26, 0.88);
-  backdrop-filter: blur(6px);
+  background: rgba(13, 13, 26, 0.92);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 50;
+  z-index: 100;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease;
 }
 
-.recording-overlay.active {
+.voice-overlay.active {
   opacity: 1;
+  pointer-events: all;
 }
 
-.rec-content {
+.vo-content {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 36px;
 }
 
-.rec-waveform {
-  display: flex;
+/* ── Listening: animated waveform bars ── */
+.vo-waveform {
+  display: none;
   align-items: center;
   gap: 10px;
   height: 96px;
 }
+.voice-overlay.listening .vo-waveform { display: flex; }
 
-.rec-bar {
+.vo-bar {
   display: block;
   width: 10px;
   border-radius: 5px;
   background: var(--accent);
   box-shadow: 0 0 12px var(--accent-glow);
-  animation: rec-wave 1.1s ease-in-out infinite;
+  animation: vo-wave 1.1s ease-in-out infinite;
 }
 
-/* Heights create a symmetric bell shape */
-.rec-bar:nth-child(1) { height: 18px; animation-delay: 0.00s; }
-.rec-bar:nth-child(2) { height: 36px; animation-delay: 0.10s; }
-.rec-bar:nth-child(3) { height: 58px; animation-delay: 0.20s; }
-.rec-bar:nth-child(4) { height: 80px; animation-delay: 0.30s; }
-.rec-bar:nth-child(5) { height: 58px; animation-delay: 0.20s; }
-.rec-bar:nth-child(6) { height: 36px; animation-delay: 0.10s; }
-.rec-bar:nth-child(7) { height: 18px; animation-delay: 0.00s; }
+/* Bell-curve heights */
+.vo-bar:nth-child(1) { height: 18px; animation-delay: 0.00s; }
+.vo-bar:nth-child(2) { height: 36px; animation-delay: 0.10s; }
+.vo-bar:nth-child(3) { height: 58px; animation-delay: 0.20s; }
+.vo-bar:nth-child(4) { height: 80px; animation-delay: 0.30s; }
+.vo-bar:nth-child(5) { height: 58px; animation-delay: 0.20s; }
+.vo-bar:nth-child(6) { height: 36px; animation-delay: 0.10s; }
+.vo-bar:nth-child(7) { height: 18px; animation-delay: 0.00s; }
 
-@keyframes rec-wave {
+@keyframes vo-wave {
   0%, 100% { transform: scaleY(0.35); opacity: 0.5; }
   50%       { transform: scaleY(1.00); opacity: 1.0; }
 }
 
-.rec-label {
+/* ── Processing: spinning ring ── */
+.vo-spinner {
+  display: none;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 5px solid rgba(3, 169, 244, 0.2);
+  border-top-color: var(--accent);
+  animation: vo-spin 0.9s linear infinite;
+}
+.voice-overlay.processing .vo-spinner { display: block; }
+
+@keyframes vo-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Speaking: bouncing bars in green ── */
+.vo-speakform {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  height: 96px;
+}
+.voice-overlay.speaking .vo-speakform { display: flex; }
+
+.vo-sbar {
+  display: block;
+  width: 12px;
+  border-radius: 6px;
+  background: #66bb6a;
+  box-shadow: 0 0 14px rgba(102, 187, 106, 0.5);
+  animation: vo-speak 0.55s ease-in-out infinite alternate;
+}
+
+.vo-sbar:nth-child(1) { height: 30px; animation-delay: 0.00s; }
+.vo-sbar:nth-child(2) { height: 55px; animation-delay: 0.11s; }
+.vo-sbar:nth-child(3) { height: 75px; animation-delay: 0.22s; }
+.vo-sbar:nth-child(4) { height: 55px; animation-delay: 0.11s; }
+.vo-sbar:nth-child(5) { height: 30px; animation-delay: 0.00s; }
+
+@keyframes vo-speak {
+  from { transform: scaleY(0.4); }
+  to   { transform: scaleY(1.0); }
+}
+
+.vo-label {
   font-size: 1.5rem;
   font-weight: 500;
   color: var(--accent);
   letter-spacing: 0.06em;
+}
+
+.voice-overlay.speaking .vo-label { color: #66bb6a; }
+
+.vo-transcript {
+  font-size: 1.15rem;
+  color: var(--text);
+  max-width: 700px;
+  text-align: center;
+  min-height: 1.4em;
+  opacity: 0.9;
 }
 
 /* First-run setup notice */

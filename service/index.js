@@ -775,6 +775,21 @@ service.register('voice/start', function(message) {
   voiceTranscript = '';
   voiceTtsUrl     = '';
   setVoiceState('listening');
+
+  // If triggered from outside the app (inputhook, luna-send), bring the app to
+  // the foreground as an overlay so the user sees the voice UI from any app.
+  var fromApp = message.payload && message.payload.fromApp;
+  if (!fromApp) {
+    service.call(
+      'luna://com.webos.applicationManager/launch',
+      { id: APP_ID, params: { action: 'overlay' } },
+      function(res) {
+        if (!res.payload.returnValue) {
+          log('overlay launch failed:', JSON.stringify(res.payload).slice(0, 120));
+        }
+      }
+    );
+  }
   var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
   if (sttMode === STT_MODE.HA) {
     // HA Whisper STT pipeline (audio → STT → intent → TTS).

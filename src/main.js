@@ -95,11 +95,14 @@ const setupNotice      = $('setup-notice');
 const btnSetup         = $('btn-setup');
 const setupStatus      = $('setup-status');
 const setupUrl         = $('setup-url');
-const recordingOverlay = $('recording-overlay');
+const voiceOverlay     = $('voice-overlay');
+const overlayLabel     = $('overlay-label');
+const overlayTranscript = $('overlay-transcript');
 
 // ── App state ──────────────────────────────────────────────────────────────────
-let haClient = null;
-let config   = loadConfig();
+let haClient     = null;
+let config       = loadConfig();
+let _overlayMode = false;  // true when launched from another app via overlay param
 
 // ── webOS launch params ────────────────────────────────────────────────────────
 function getLaunchParams() {
@@ -125,6 +128,7 @@ function handleLaunchParams(params) {
       saveConfig(config);
       haClient?.disconnect();
       haClient = null;
+      _overlayMode = false;
       showMain();
       initClient({});
     }
@@ -132,6 +136,13 @@ function handleLaunchParams(params) {
   }
 
   if (!haClient?.connected) return;
+
+  if (params.action === 'overlay') {
+    // Launched from another app via mic button – show overlay, auto-hide when done.
+    _overlayMode = true;
+    showMain();
+    return;
+  }
 
   if (params.action === 'start') {
     voiceStart();
@@ -390,7 +401,7 @@ function playTts(ttsUrl) {
 
 function voiceStart() {
   if (!haClient?.connected) return;
-  lunaCall('luna://com.homebrew.havoice.service/voice/start', {}).catch(
+  lunaCall('luna://com.homebrew.havoice.service/voice/start', { fromApp: true }).catch(
     e => console.warn('[voice] start failed:', e.message)
   );
 }
@@ -416,19 +427,43 @@ const STATE_LABELS = {
   [SvcState.ERROR]:      'Something went wrong',
 };
 
+const OVERLAY_LABELS = {
+  [SvcState.LISTENING]:  'Listening…',
+  [SvcState.PROCESSING]: 'Processing…',
+  [SvcState.SPEAKING]:   'Speaking…',
+};
+
+const ACTIVE_STATES = new Set([SvcState.LISTENING, SvcState.PROCESSING, SvcState.SPEAKING]);
+
 function setOrbState(state) {
   orb.className = `orb ${state}`;
   stateLabel.textContent = STATE_LABELS[state] ?? '';
-  recordingOverlay.classList.toggle('active', state === SvcState.LISTENING);
+
+  const overlayActive = ACTIVE_STATES.has(state);
+  voiceOverlay.className = overlayActive ? `voice-overlay active ${state}` : 'voice-overlay';
+  if (overlayActive) {
+    overlayLabel.textContent = OVERLAY_LABELS[state] ?? '';
+  } else {
+    overlayTranscript.textContent = '';
+  }
 
   if (state === SvcState.IDLE || state === SvcState.ERROR) {
     setTimeout(() => hideTranscript(), state === SvcState.IDLE ? 4000 : 0);
+
+    if (_overlayMode && state === SvcState.IDLE) {
+      _overlayMode = false;
+      // Brief pause so the user sees speaking/result before the overlay hides.
+      setTimeout(() => {
+        if (window.PalmSystem) window.PalmSystem.hide();
+      }, 1200);
+    }
   }
 }
 
 function showTranscript(text) {
   transcriptText.textContent = text;
   transcriptBox.classList.remove('hidden');
+  overlayTranscript.textContent = text;
 }
 
 function hideTranscript() {
