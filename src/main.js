@@ -66,10 +66,12 @@ function syncServiceConfig(overrideToken) {
   }).catch(err => console.warn('[main] setHAConfig failed:', err.message));
 }
 
-function updateStoredToken(newToken) {
-  config.token = newToken;  // keep in-memory config in sync too
+function updateStoredToken(newToken, newRefreshToken) {
+  config.token = newToken;
+  if (newRefreshToken) config.refreshToken = newRefreshToken;
   const cfg = loadConfig();
   cfg.token = newToken;
+  if (newRefreshToken) cfg.refreshToken = newRefreshToken;
   saveConfig(cfg);
   syncServiceConfig(newToken);
 }
@@ -159,6 +161,24 @@ const launchParams = getLaunchParams();
 if (config.url && config.token) {
   showMain();
   initClient(launchParams);
+} else if (window.PalmServiceBridge) {
+  // localStorage may have been cleared (webOS memory pressure / reinstall).
+  // Try to recover from the config the service persisted to disk.
+  lunaCall('luna://com.homebrew.havoice.service/getConfig', {})
+    .then(svcCfg => {
+      config = {
+        url:          svcCfg.url,
+        token:        svcCfg.token,
+        pipelineId:   svcCfg.pipelineId   || '',
+        refreshToken: svcCfg.refreshToken || '',
+        clientId:     svcCfg.clientId     || '',
+        sttMode:      svcCfg.sttMode      || 'lg',
+      };
+      saveConfig(config);
+      showMain();
+      initClient(launchParams);
+    })
+    .catch(() => showConfig());
 } else {
   showConfig();
 }

@@ -8,6 +8,7 @@
  *   /isSetupDone      – returns whether the mic button keybind is configured.
  *   /startSetupServer – starts the OAuth companion HTTP server, returns { url }.
  *   /stopSetupServer  – shuts down the companion HTTP server.
+ *   /getConfig        – return persisted HA config (for localStorage recovery).
  *   /setHAConfig      – store { url, token, pipelineId } for voice pipeline.
  *   /voice/start      – begin a voice interaction (voiceinput → HA pipeline).
  *   /voice/stop       – stop recording, let HA finish STT → TTS.
@@ -489,7 +490,8 @@ var voiceSub        = null;     // voiceinput luna subscription handle
 var voiceMsgId      = 1;
 
 // Persist HA config so mic button works without the app being open first.
-var HA_CONFIG_FILE = '/tmp/ha-voice-ha-config.json';
+// /media/developer/ is on NAND and survives TV reboots (unlike /tmp/).
+var HA_CONFIG_FILE = '/media/developer/ha-voice-config.json';
 try {
   voiceHAConfig = JSON.parse(fs.readFileSync(HA_CONFIG_FILE, 'utf8'));
   log('Loaded HA config for:', voiceHAConfig.url);
@@ -539,8 +541,10 @@ function ensureFreshToken() {
   var cfg = voiceHAConfig;
   var payload = jwtPayload(cfg.token);
   var nowSec = Date.now() / 1000;
-  if (payload && payload.exp && payload.exp - nowSec > 60) {
-    return Promise.resolve(); // token still good
+  // Long-lived access tokens may have no exp (or a far-future exp): treat as good.
+  // Only try to refresh when we can actually decode an expiry that is near.
+  if (!payload || !payload.exp || payload.exp - nowSec > 60) {
+    return Promise.resolve(); // token still good (no exp = LLAT, or not near expiry)
   }
   if (!cfg.refreshToken || !cfg.clientId) {
     return Promise.reject(new Error('token expired and no refresh credentials'));
@@ -555,6 +559,7 @@ function ensureFreshToken() {
     }
     log('token refreshed OK');
     cfg.token = res.body.access_token;
+    if (res.body.refresh_token) cfg.refreshToken = res.body.refresh_token;
     voiceHAConfig = cfg;
     try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(cfg)); } catch (_) {}
   });
@@ -739,6 +744,34 @@ service.register('setup', function(message) {
   } catch (err) {
     message.respond({ returnValue: false, errorText: err.message });
   }
+});
+
+/**
+ * /getConfig – returns the persisted HA config so the browser app can restore
+ * its state after webOS clears localStorage (memory pressure / reinstall).
+ * For OAuth configs, tries to refresh the access token first so the browser
+ * gets a fresh token and avoids an auth_invalid round-trip on reconnect.
+ */
+service.register('getConfig', function(message) {
+  if (!voiceHAConfig || !voiceHAConfig.url) {
+    message.respond({ returnValue: false, errorText: 'no config stored' });
+    return;
+  }
+  function respond() {
+    message.respond({
+      returnValue:  true,
+      url:          voiceHAConfig.url,
+      token:        voiceHAConfig.token,
+      pipelineId:   voiceHAConfig.pipelineId   || '',
+      refreshToken: voiceHAConfig.refreshToken || '',
+      clientId:     voiceHAConfig.clientId     || '',
+      sttMode:      voiceHAConfig.sttMode      || STT_MODE.LG,
+    });
+  }
+  // Best-effort refresh for OAuth tokens before returning.
+  // If refresh fails, return the stored token anyway – the browser's HAClient
+  // will handle auth_invalid and retry with the refresh token itself.
+  ensureFreshToken().then(respond).catch(respond);
 });
 
 /**

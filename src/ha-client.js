@@ -222,7 +222,7 @@ export class HAClient {
             .then(newToken => {
               this.#refreshing = false;
               this.#token = newToken;
-              this.#onTokenRefreshed?.(newToken);
+              this.#onTokenRefreshed?.(newToken, this.#refreshToken);
               this.#intentionalClose = false;
               this.#openSocket(); // reconnect with fresh token
             })
@@ -269,7 +269,7 @@ export class HAClient {
         try {
           const newToken = await this.#refreshAccessToken();
           this.#token = newToken;
-          this.#onTokenRefreshed?.(newToken);
+          this.#onTokenRefreshed?.(newToken, this.#refreshToken);
         } catch (err) {
           console.warn('[HAClient] Token refresh failed:', err.message);
           // Proceed anyway — maybe the existing token is still valid
@@ -295,6 +295,8 @@ export class HAClient {
     if (!res.ok) throw new Error('Refresh failed: HTTP ' + res.status);
     const data = await res.json();
     if (!data.access_token) throw new Error('No access_token in refresh response');
+    // HA doesn't rotate refresh tokens by default, but update it if returned.
+    if (data.refresh_token) this.#refreshToken = data.refresh_token;
     return data.access_token;
   }
 
