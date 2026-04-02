@@ -13,7 +13,7 @@
  *   /voice/start      – begin a voice interaction (voiceinput → HA pipeline).
  *   /voice/stop       – stop recording, let HA finish STT → TTS.
  *   /voice/abort      – abort immediately, return to idle.
- *   /voice/state      – return current { state, transcript, ttsUrl }.
+ *   /voice/state      – subscribe to { state, transcript, ttsUrl } push updates.
  *
  * webos-service is provided by the TV's Node.js runtime – do NOT bundle it.
  */
@@ -480,12 +480,13 @@ function wsConnect(wsUrl, onMessage, onError, onClose) {
 
 var STT_MODE = { LG: 'lg', HA: 'ha' };
 
-var voiceState      = 'idle';   // idle | listening | processing | speaking | error
-var voiceTranscript = '';
-var voiceTtsUrl     = '';
-var voiceHAConfig   = null;     // { url, token, pipelineId, sttMode }
-var voiceWS         = null;     // active HA WebSocket (STT or text pipeline)
-var voiceSocket     = null;     // Unix socket to voiceinput
+var voiceState       = 'idle';   // idle | listening | processing | speaking | error
+var voiceTranscript  = '';
+var voiceTtsUrl      = '';
+var voiceHAConfig    = null;     // { url, token, pipelineId, sttMode }
+var voiceWS          = null;     // active HA WebSocket (STT or text pipeline)
+var voiceSocket      = null;     // Unix socket to voiceinput
+var voiceSubscribers = {};       // token → Luna message (for voice/state subscriptions)
 var voiceSub        = null;     // voiceinput luna subscription handle
 var voiceMsgId      = 1;
 
@@ -497,10 +498,29 @@ try {
   log('Loaded HA config for:', voiceHAConfig.url);
 } catch (_) {}
 
+/**
+ * Push current voice state to all subscribers. ttsUrl is delivered once
+ * then cleared so it is not replayed to late-joining subscribers.
+ */
+function broadcastVoiceState() {
+  var tts = voiceTtsUrl;
+  voiceTtsUrl = '';
+  var payload = {
+    returnValue: true,
+    state:       voiceState,
+    transcript:  voiceTranscript,
+    ttsUrl:      tts,
+  };
+  Object.keys(voiceSubscribers).forEach(function(token) {
+    try { voiceSubscribers[token].respond(payload); } catch (_) {}
+  });
+}
+
 function setVoiceState(s) {
   if (voiceState === s) return;
   log('voice state:', voiceState, '->', s);
   voiceState = s;
+  broadcastVoiceState();
 }
 
 function voiceCleanup() {
@@ -877,11 +897,12 @@ service.register('voice/abort', function(message) {
 });
 
 /**
- * /voice/state – browser app polls this to update UI.
- * Returns { state, transcript, ttsUrl }.
- * ttsUrl is delivered once then cleared.
+ * /voice/state – returns current voice state; with subscribe:true the service
+ * pushes an update on every state transition so the browser does not need to
+ * poll. ttsUrl is delivered exactly once in the broadcast that triggered it.
  */
 service.register('voice/state', function(message) {
+  // Respond immediately with the current snapshot.
   var tts = voiceTtsUrl;
   if (tts) voiceTtsUrl = '';
   message.respond({
@@ -890,6 +911,13 @@ service.register('voice/state', function(message) {
     transcript:  voiceTranscript,
     ttsUrl:      tts,
   });
+
+  if (message.isSubscription()) {
+    voiceSubscribers[message.uniqueToken] = message;
+    message.setCancelFunction(function() {
+      delete voiceSubscribers[message.uniqueToken];
+    });
+  }
 });
 
 /**
@@ -1011,6 +1039,9 @@ function runHATextPipelineWithFallback(candidates) {
   var rest = candidates.slice(1);
   log('[vc] trying candidate:', JSON.stringify(text), '(' + rest.length + ' remaining)');
   voiceTranscript = text;
+  // State may already be 'processing' on a retry – broadcast so subscribers
+  // see the updated transcript even though the state hasn't changed.
+  if (voiceState === 'processing') broadcastVoiceState();
 
   runHATextPipeline(text, function onIntentResult(matched) {
     if (!matched && rest.length > 0) {

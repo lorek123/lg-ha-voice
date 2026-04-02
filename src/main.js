@@ -16,7 +16,7 @@
  */
 
 import { HAClient } from './ha-client.js';
-import { lunaCall } from './luna.js';
+import { lunaCall, lunaSubscribe } from './luna.js';
 
 // ── Key codes ──────────────────────────────────────────────────────────────────
 const KEY = {
@@ -27,7 +27,7 @@ const KEY = {
 };
 const VOICE_KEYS = new Set([KEY.OK, KEY.MIC, KEY.AI]);
 
-// ── Voice state (mirrored from service, updated by polling) ───────────────────
+// ── Voice state (mirrored from service via subscription) ──────────────────────
 const SvcState = Object.freeze({
   IDLE:       'idle',
   LISTENING:  'listening',
@@ -36,10 +36,9 @@ const SvcState = Object.freeze({
   ERROR:      'error',
 });
 
-let svcState        = SvcState.IDLE;
-let svcTranscript   = '';
-let _statePollTimer = null;
-let _pollInFlight   = false;
+let svcState      = SvcState.IDLE;
+let svcTranscript = '';
+let _voiceStateSub = null;  // cancel function for the voice/state subscription
 
 // ── Config storage ─────────────────────────────────────────────────────────────
 const CONFIG_KEY = 'ha_voice_config';
@@ -281,7 +280,7 @@ btnSave.addEventListener('click', () => {
 btnSettings.addEventListener('click', () => {
   haClient?.disconnect();
   haClient = null;
-  stopStatePoll();
+  cancelVoiceStateSub();
   showConfig();
 });
 
@@ -305,7 +304,7 @@ function initClient(initialParams = {}) {
     syncServiceConfig();
 
     checkSetup();
-    startStatePoll();
+    subscribeVoiceState();
 
     if (initialParams && Object.keys(initialParams).length) {
       const p = initialParams;
@@ -316,7 +315,7 @@ function initClient(initialParams = {}) {
 
   haClient.on('disconnected', () => {
     setConnState('disconnected', 'Disconnected');
-    stopStatePoll();
+    cancelVoiceStateSub();
     setOrbState(SvcState.IDLE);
   });
 
@@ -369,40 +368,27 @@ btnSetup.addEventListener('click', async () => {
   }
 });
 
-// ── Service state polling ──────────────────────────────────────────────────────
-// Poll the service every 400 ms to update the orb UI and play TTS audio.
+// ── Service state subscription ────────────────────────────────────────────────
+// Subscribe once; the service pushes a message on every state transition.
 
-function startStatePoll() {
-  stopStatePoll();
-  _statePollTimer = setInterval(pollVoiceState, 400);
-}
-
-function stopStatePoll() {
-  if (_statePollTimer) { clearInterval(_statePollTimer); _statePollTimer = null; }
-}
-
-async function pollVoiceState() {
-  if (_pollInFlight) return;
-  _pollInFlight = true;
-  try {
-    const res = await lunaCall('luna://com.homebrew.havoice.service/voice/state', {});
-    const newState = res.state || SvcState.IDLE;
-
-    if (newState !== svcState || res.transcript !== svcTranscript) {
-      svcState      = newState;
+function subscribeVoiceState() {
+  cancelVoiceStateSub();
+  _voiceStateSub = lunaSubscribe(
+    'luna://com.homebrew.havoice.service/voice/state',
+    {},
+    (res) => {
+      if (!res.returnValue) return;
+      svcState      = res.state || SvcState.IDLE;
       svcTranscript = res.transcript || '';
       setOrbState(svcState);
       if (svcTranscript) showTranscript(svcTranscript);
+      if (res.ttsUrl) playTts(res.ttsUrl);
     }
+  );
+}
 
-    // TTS URL is delivered once (service clears it after responding).
-    if (res.ttsUrl) {
-      playTts(res.ttsUrl);
-    }
-  } catch (_) {
-  } finally {
-    _pollInFlight = false;
-  }
+function cancelVoiceStateSub() {
+  if (_voiceStateSub) { _voiceStateSub(); _voiceStateSub = null; }
 }
 
 function playTts(ttsUrl) {

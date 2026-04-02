@@ -23,3 +23,20 @@ export function lunaCall(uri, params = {}) {
     bridge.call(uri, JSON.stringify(params));
   });
 }
+
+/**
+ * Open a persistent Luna subscription. `callback` is invoked for every
+ * message the service pushes (including the initial response).
+ * Returns a cancel function – call it to unsubscribe.
+ */
+export function lunaSubscribe(uri, params = {}, callback) {
+  if (!window.PalmServiceBridge) return () => {};
+  const bridge = new window.PalmServiceBridge();
+  bridge.onservicecallback = (msg) => {
+    let result;
+    try { result = JSON.parse(msg); } catch (_) { result = {}; }
+    callback(result);
+  };
+  bridge.call(uri, JSON.stringify({ ...params, subscribe: true }));
+  return () => { try { bridge.cancel(); } catch (_) {} };
+}
