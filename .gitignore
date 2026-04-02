@@ -5,9 +5,6 @@ node_modules/
 dist/
 *.ipk
 
-# Lock file (TV-side Node is pinned; lock adds noise without value)
-package-lock.json
-
 # Developer tooling / local environment
 .claude/
 
