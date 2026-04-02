@@ -12,6 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Ensure nvm-managed Node/npm tools are in PATH
+# shellcheck source=/dev/null
 [ -s "$HOME/.nvm/nvm.sh" ] && source "$HOME/.nvm/nvm.sh"
 
 DEVICE="${DEVICE:-tv}"
@@ -20,7 +21,7 @@ APP_ID="com.homebrew.havoice"
 echo "==> Building..."
 bash scripts/build.sh
 
-IPK=$(ls ${APP_ID}_*.ipk 2>/dev/null | sort -V | tail -1)
+IPK=$(find . -maxdepth 1 -name "${APP_ID}_*.ipk" 2>/dev/null | sort -V | tail -1)
 
 echo "==> Installing $IPK on device '$DEVICE'..."
 npx ares-install --verbose --device "$DEVICE" "$IPK"

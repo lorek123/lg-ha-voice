@@ -18,7 +18,6 @@
 
 set -e
 
-APP_ID="com.homebrew.havoice"
 SCRIPT_PATH="/home/root/.config/lginputhook/ha-voice-mic.sh"
 KEYBINDS_PATH="/home/root/.config/lginputhook/keybinds.json"
 

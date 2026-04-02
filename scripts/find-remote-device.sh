@@ -18,7 +18,7 @@ echo ""
 
 for dev in /dev/input/event*; do
   (
-    dd if="$dev" bs=1 2>/dev/null | od -An -tx1 -w1 | while read byte; do
+    dd if="$dev" bs=1 2>/dev/null | od -An -tx1 -w1 | while read -r byte; do
       printf "%s %s\n" "$dev" "$byte"
     done
   ) &

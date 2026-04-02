@@ -13,7 +13,6 @@
 
 set -e
 
-APP_ID="com.homebrew.havoice"
 KEYBIND_DIR="/home/root/.config/lginputhook"
 KEYBINDS_JSON="$KEYBIND_DIR/keybinds.json"
 HANDLER_SCRIPT="$KEYBIND_DIR/ha-voice-mic.sh"

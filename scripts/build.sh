@@ -15,6 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=/dev/null
 [ -s "$HOME/.nvm/nvm.sh" ] && source "$HOME/.nvm/nvm.sh"
 
 APP_ID="com.homebrew.havoice"
@@ -69,7 +70,7 @@ cp service/setup.sh      "$DIST/services/"
 echo "==> Running ares-package..."
 npx ares-package "$DIST" --outdir .
 
-IPK=$(ls ${APP_ID}_*.ipk 2>/dev/null | sort -V | tail -1)
+IPK=$(find . -maxdepth 1 -name "${APP_ID}_*.ipk" 2>/dev/null | sort -V | tail -1)
 echo ""
 echo "==> Built: $IPK"
 echo ""
