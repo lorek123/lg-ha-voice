@@ -14,6 +14,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can switch to main later.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -36,15 +39,27 @@ jobs:
       - name: Stamp version from tag into appinfo.json
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           node -e "
             const fs = require('fs');
             const info = JSON.parse(fs.readFileSync('appinfo.json', 'utf8'));
-            info.version = '$VERSION';
+            info.version = process.env.VERSION;
             fs.writeFileSync('appinfo.json', JSON.stringify(info, null, 2) + '\n');
           "
 
       - name: Build IPK
         run: npm run build
+
+      - name: Compute IPK metadata
+        run: |
+          IPK=$(ls com.homebrew.havoice_*.ipk | sort -V | tail -1)
+          HASH=$(sha256sum "$IPK" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$IPK")
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${IPK}"
+          echo "IPK_FILE=$IPK"  >> "$GITHUB_ENV"
+          echo "IPK_HASH=$HASH" >> "$GITHUB_ENV"
+          echo "IPK_SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "IPK_URL=$URL"   >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -52,3 +67,23 @@ jobs:
           files: '*.ipk'
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Update Homebrew Channel repository manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Switch to main; discard build artefacts left in the working tree.
+          git checkout -f main
+          node -e "
+            const fs = require('fs');
+            const apps = JSON.parse(fs.readFileSync('docs/api/apps.json', 'utf8'));
+            const m = apps.packages[0].manifest;
+            m.version = process.env.VERSION;
+            m.ipkUrl  = process.env.IPK_URL;
+            m.ipkHash = { sha256: process.env.IPK_HASH };
+            m.ipkSize = parseInt(process.env.IPK_SIZE, 10);
+            fs.writeFileSync('docs/api/apps.json', JSON.stringify(apps, null, 2) + '\n');
+          "
+          git add docs/api/apps.json
+          git commit -m "chore: update repository manifest for ${{ github.ref_name }}"
+          git push origin main
