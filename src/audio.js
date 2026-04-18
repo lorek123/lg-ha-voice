@@ -8,6 +8,26 @@
 const SAMPLE_RATE = 16000;
 const CHUNK_DURATION_MS = 100; // send a chunk every 100ms
 
+// ── WebOS Luna helpers ────────────────────────────────────────────────────────
+
+function palmCall(uri, params) {
+  if (typeof window === 'undefined' || !window.PalmServiceBridge) return;
+  const bridge = new window.PalmServiceBridge();
+  if (!bridge.call) return;
+  bridge.onservicecallback = () => {};
+  bridge.call(uri, JSON.stringify(params));
+}
+
+// Required before playing TTS via WebAudio or <audio> on HDMI/optical outputs.
+// Learned from com.webos.app.googleassistant/js/AudioStreamingService.js.
+function setMixDigitalAudioOut(on) {
+  palmCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: on });
+}
+
+function setMediaVolume(volume) {
+  palmCall('luna://com.webos.audio/media/setVolume', { volume });
+}
+
 export class AudioManager {
   #audioCtx = null;
   #mediaStream = null;
@@ -88,6 +108,18 @@ export class AudioManager {
     return this.#recording;
   }
 
+  // ── Volume ducking ──────────────────────────────────────────────────────────
+
+  // Duck TV media volume while the mic is open so ambient sound doesn't bleed
+  // into the recording. Mirrors the sttStart handler in com.webos.app.googleassistant.
+  duckVolume() {
+    setMediaVolume(20);
+  }
+
+  restoreVolume() {
+    setMediaVolume(100);
+  }
+
   // ── Playback (TTS) ──────────────────────────────────────────────────────────
 
   /**
@@ -101,12 +133,17 @@ export class AudioManager {
   async playTTS(haBaseUrl, ttsUrl) {
     const url = ttsUrl.startsWith('http') ? ttsUrl : haBaseUrl.replace(/\/$/, '') + ttsUrl;
 
-    return new Promise((resolve, reject) => {
-      const audio = new Audio(url);
-      audio.onended = resolve;
-      audio.onerror = () => reject(new Error('TTS playback failed'));
-      audio.play().catch(reject);
-    });
+    setMixDigitalAudioOut(true);
+    try {
+      await new Promise((resolve, reject) => {
+        const audio = new Audio(url);
+        audio.onended = resolve;
+        audio.onerror = () => reject(new Error('TTS playback failed'));
+        audio.play().catch(reject);
+      });
+    } finally {
+      setMixDigitalAudioOut(false);
+    }
   }
 }
 

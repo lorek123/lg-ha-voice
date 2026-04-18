@@ -47,11 +47,13 @@ export class VoicePipeline {
     }
 
     this.#setState(State.LISTENING);
+    this.#audio.duckVolume();
 
     try {
       this.#pipelineController = this.#ha.runVoicePipeline({
         pipelineId: this.#pipelineId || undefined,
         onSttEnd: (text) => {
+          this.#audio.restoreVolume();
           this.#onTranscript?.(text);
           this.#setState(State.PROCESSING);
         },
@@ -110,12 +112,14 @@ export class VoicePipeline {
   /** Abort everything and return to idle immediately. */
   abort() {
     this.#audio.stopRecording();
+    this.#audio.restoreVolume();
     this.#pipelineController = null;
     this.#setState(State.IDLE);
   }
 
   #cleanup(nextState) {
     if (this.#audio.isRecording) this.#audio.stopRecording();
+    this.#audio.restoreVolume();
     this.#pipelineController = null;
     this.#setState(nextState);
   }

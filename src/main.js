@@ -281,6 +281,7 @@ btnSettings.addEventListener('click', () => {
   haClient?.disconnect();
   haClient = null;
   cancelVoiceStateSub();
+  cancelTvPowerSub();
   showConfig();
 });
 
@@ -305,6 +306,7 @@ function initClient(initialParams = {}) {
 
     checkSetup();
     subscribeVoiceState();
+    subscribeTvPower();
 
     if (initialParams && Object.keys(initialParams).length) {
       const p = initialParams;
@@ -316,6 +318,7 @@ function initClient(initialParams = {}) {
   haClient.on('disconnected', () => {
     setConnState('disconnected', 'Disconnected');
     cancelVoiceStateSub();
+    cancelTvPowerSub();
     setOrbState(SvcState.IDLE);
   });
 
@@ -381,7 +384,10 @@ function subscribeVoiceState() {
       svcState      = res.state || SvcState.IDLE;
       svcTranscript = res.transcript || '';
       setOrbState(svcState);
-      if (svcTranscript) showTranscript(svcTranscript);
+      if (svcTranscript) {
+        showTranscript(svcTranscript);
+        showToast(svcTranscript);
+      }
       if (res.ttsUrl) playTts(res.ttsUrl);
     }
   );
@@ -391,13 +397,65 @@ function cancelVoiceStateSub() {
   if (_voiceStateSub) { _voiceStateSub(); _voiceStateSub = null; }
 }
 
+// ── WebOS native integrations ─────────────────────────────────────────────────
+
+function showToast(message) {
+  lunaCall('luna://com.webos.notification/createToast', {
+    sourceId: 'com.homebrew.havoice',
+    message,
+  }).catch(() => {});
+}
+
+function speakNative(text) {
+  lunaCall('luna://com.webos.service.tts/speak', { text, clear: true }).catch(() => {});
+}
+
+let _tvPowerSub = null;
+
+function subscribeTvPower() {
+  cancelTvPowerSub();
+  _tvPowerSub = lunaSubscribe(
+    'luna://com.webos.service.tvpower/power/getPowerState',
+    {},
+    (res) => {
+      if (!res.returnValue) return;
+      const suspendStates   = new Set(['Suspend', 'Active Standby']);
+      const suspendProcess  = new Set([
+        'Request Suspend', 'Request Active Standby',
+        'Prepare Suspend',  'Prepare Active Standby',
+        'Request Power Off', 'Prepare Power Off',
+      ]);
+      if ((suspendStates.has(res.state) || suspendProcess.has(res.processing))
+          && svcState !== SvcState.IDLE && svcState !== SvcState.ERROR) {
+        voiceAbort();
+      }
+    }
+  );
+}
+
+function cancelTvPowerSub() {
+  if (_tvPowerSub) { _tvPowerSub(); _tvPowerSub = null; }
+}
+
+// ── TTS playback ──────────────────────────────────────────────────────────────
+
 function playTts(ttsUrl) {
   try {
     const url = ttsUrl.startsWith('http') ? ttsUrl : config.url.replace(/\/$/, '') + ttsUrl;
+    lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: true }).catch(() => {});
     const audio = new Audio(url);
-    audio.onended = () => {};
-    audio.onerror = (e) => console.warn('[TTS] playback error', e);
-    audio.play().catch(e => console.warn('[TTS] play() rejected', e));
+    audio.onended = () => {
+      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
+    };
+    audio.onerror = () => {
+      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
+      console.warn('[TTS] playback error');
+      speakNative('Sorry, I could not play the response.');
+    };
+    audio.play().catch(e => {
+      lunaCall('luna://com.webos.service.audio/tv/mixDigitalSoundOutput', { mix: false }).catch(() => {});
+      console.warn('[TTS] play() rejected', e);
+    });
   } catch (e) {
     console.warn('[TTS] playTts error', e);
   }
@@ -455,6 +513,10 @@ function setOrbState(state) {
 
   if (state === SvcState.IDLE || state === SvcState.ERROR) {
     setTimeout(() => hideTranscript(), state === SvcState.IDLE ? 4000 : 0);
+
+    if (state === SvcState.ERROR) {
+      speakNative('Sorry, something went wrong.');
+    }
 
     if (_overlayMode && state === SvcState.IDLE) {
       _overlayMode = false;

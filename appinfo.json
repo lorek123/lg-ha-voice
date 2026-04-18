@@ -1,6 +1,6 @@
 {
   "id": "com.homebrew.havoice",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "vendor": "homebrew",
   "type": "web",
   "main": "index.html",
