@@ -28,14 +28,14 @@ The app has two parts that work together:
 - **Browser app** (`com.homebrew.havoice`) — runs in WebAppManager (WAM). Displays the orb UI, plays TTS audio, connects to HA over WebSocket for token refresh.
 - **Luna service** (`com.homebrew.havoice.service`) — runs as a persistent Node.js process. Handles the actual voice pipeline: audio capture, speech recognition, sending commands to HA, receiving TTS URLs.
 
-The Magic Remote mic button is intercepted by [lginputhook](https://github.com/webosbrew/lginputhook), which calls the Luna service directly via `luna-send`. The service runs the entire voice pipeline independently — the browser app only needs to be open for its UI and audio playback.
+The Magic Remote mic button is intercepted by [lginputhook](https://github.com/Simon34545/lginputhook), which calls the Luna service directly via `luna-send`. The service runs the entire voice pipeline independently — the browser app only needs to be open for its UI and audio playback.
 
 ---
 
 ## Prerequisites
 
 - **Rooted LG webOS TV** with [Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel) installed
-- **[lginputhook](https://github.com/webosbrew/lginputhook)** installed (provides key interception)
+- **[lginputhook](https://github.com/Simon34545/lginputhook)** installed (provides key interception)
 - **Home Assistant** with the [Assist pipeline](https://www.home-assistant.io/docs/assist/) configured
 - A development machine with Node.js ≥ 18 and `@webos-tools/cli` (`npm install -g @webos-tools/cli`)
 
@@ -472,8 +472,8 @@ ssh root@<tv-ip> 'tail -f /tmp/ha-voice-service.log'
 Tag a commit with `vX.Y.Z` and push — GitHub Actions builds the IPK and creates a GitHub release with the artifact attached.
 
 ```sh
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 The workflow stamps the version into `appinfo.json` before packaging, so the IPK version matches the tag.
