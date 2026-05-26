@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 # shellcheck source=/dev/null
 [ -s "$HOME/.nvm/nvm.sh" ] && source "$HOME/.nvm/nvm.sh"
 
-DEVICE="${DEVICE:-tv}"
+DEVICE="${DEVICE:-tvlorkaeth}"
 APP_ID="com.homebrew.havoice"
 
 echo "==> Building..."

@@ -72,11 +72,13 @@ var HANDLER_DIR    = '/home/root/.config/lginputhook';
 var HANDLER_SCRIPT = path.join(HANDLER_DIR, 'ha-voice-mic.sh');
 var MIC_KEYCODE    = '428';
 
-// Call the service directly – bypasses applicationManager/launch which does not
-// reliably fire webOSRelaunch in the running WAM app on this TV model.
+// Launch the app in background first (so it can show the orb), then start voice.
+// Running applicationManager/launch with & decouples it from the service process –
+// calling it inside the service would cause webOS to restart the service mid-pipeline.
 var HANDLER_CONTENT = '#!/bin/sh\n'
   + 'VALUE="$1"\n'
   + 'if [ "$VALUE" = "1" ]; then\n'
+  + '  luna-send -n 1 luna://com.webos.applicationManager/launch \'{"id":"com.homebrew.havoice","params":{"action":"overlay"}}\' &\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/start \'{}\'\n'
   + 'elif [ "$VALUE" = "0" ]; then\n'
   + '  luna-send -n 1 luna://com.homebrew.havoice.service/voice/stop \'{}\'\n'
@@ -107,6 +109,11 @@ function isSetupDone() {
 
 function sendToast(svc, message) {
   svc.call('luna://com.webos.notification/createToast', { sourceId: APP_ID, message: message }, function() {});
+}
+
+function speakNative(text) {
+  if (!text) return;
+  service.call('luna://com.webos.service.tts/speak', { text: text, clear: true }, function() {});
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -833,15 +840,11 @@ service.register('voice/start', function(message) {
   // the foreground as an overlay so the user sees the voice UI from any app.
   var fromApp = message.payload && message.payload.fromApp;
   if (!fromApp) {
-    service.call(
-      'luna://com.webos.applicationManager/launch',
-      { id: APP_ID, params: { action: 'overlay' } },
-      function(res) {
-        if (!res.payload.returnValue) {
-          log('overlay launch failed:', JSON.stringify(res.payload).slice(0, 120));
-        }
-      }
-    );
+    sendToast(service, 'Listening…');
+    // NOTE: we do NOT call applicationManager/launch here.  Doing so from the
+    // service kills the service process (webOS restarts associated services as
+    // part of the app launch lifecycle), aborting the active voice pipeline.
+    // The lginputhook handler script launches the app independently instead.
   }
   var sttMode = (voiceHAConfig && voiceHAConfig.sttMode) || STT_MODE.LG;
   if (sttMode === STT_MODE.HA) {
@@ -1068,6 +1071,7 @@ function runHATextPipeline(text, onIntentResult) {
     var runId   = voiceMsgId++;
     var localWS = null;       // ref to this specific WS so onClose can guard
     var intentDone = false;   // fire onIntentResult only once
+    var vcSpeechText = '';    // speech text from intent-end for native TTS fallback
 
     function signalIntent(matched) {
       if (intentDone) return;
@@ -1115,6 +1119,10 @@ function runHATextPipeline(text, onIntentResult) {
             var responseType = intentOut && intentOut.response && intentOut.response.response_type;
             var matched      = responseType !== 'error';
             log('[vc] intent-end response_type:', responseType, '→', matched ? 'matched' : 'no match');
+            // Stash HA's spoken reply for native TTS fallback if tts-start has no URL.
+            vcSpeechText = (intentOut && intentOut.response && intentOut.response.speech
+                           && intentOut.response.speech.plain && intentOut.response.speech.plain.speech) || '';
+            if (vcSpeechText) log('[vc] speech text:', JSON.stringify(vcSpeechText));
             signalIntent(matched);
 
             if (!matched) {
@@ -1127,7 +1135,13 @@ function runHATextPipeline(text, onIntentResult) {
           } else if (evt.type === 'tts-start') {
             var url = (evt.data && evt.data.tts_output && evt.data.tts_output.url) || '';
             log('[vc] tts url:', url);
-            if (url) { voiceTtsUrl = url; setVoiceState('speaking'); }
+            if (url) {
+              voiceTtsUrl = url;
+              setVoiceState('speaking');
+            } else if (vcSpeechText) {
+              speakNative(vcSpeechText);
+              vcSpeechText = '';
+            }
 
           } else if (evt.type === 'error') {
             signalIntent(false);

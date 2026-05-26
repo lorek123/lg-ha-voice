@@ -19,7 +19,7 @@
 html, body {
   width: 100%;
   height: 100%;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
   font-family: 'LG Display', 'Helvetica Neue', Arial, sans-serif;
   font-size: 20px;
@@ -169,6 +169,10 @@ html, body {
 }
 
 /* Main screen */
+#screen-main {
+  background: var(--bg);
+}
+
 .orb-container {
   display: flex;
   flex-direction: column;
@@ -348,9 +352,11 @@ html, body {
 /* Voice overlay – appears over any foreground app during voice interaction */
 .voice-overlay {
   position: fixed;
-  inset: 0;
-  background: rgba(13, 13, 26, 0.92);
-  backdrop-filter: blur(8px);
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: rgba(13, 13, 26, 0.97);
   display: flex;
   align-items: center;
   justify-content: center;

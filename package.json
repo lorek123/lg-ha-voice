@@ -9,7 +9,8 @@
     "icons": "bash scripts/generate-icons.sh",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev": "esbuild src/dev-entry.js --bundle --sourcemap --target=esnext --servedir=. --outfile=bundle.js --serve=3000"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

@@ -36,9 +36,10 @@ const SvcState = Object.freeze({
   ERROR:      'error',
 });
 
-let svcState      = SvcState.IDLE;
-let svcTranscript = '';
-let _voiceStateSub = null;  // cancel function for the voice/state subscription
+let svcState          = SvcState.IDLE;
+let svcTranscript     = '';
+let _voiceStateSub    = null;  // cancel function for the voice/state subscription
+let _appInitiatedVoice = false; // true when THIS app called voiceStart(), to distinguish from mic-button
 
 // ── Config storage ─────────────────────────────────────────────────────────────
 const CONFIG_KEY = 'ha_voice_config';
@@ -131,19 +132,23 @@ function handleLaunchParams(params) {
       haClient = null;
       _overlayMode = false;
       showMain();
+      subscribeVoiceState();
       initClient({});
     }
     return;
   }
 
-  if (!haClient?.connected) return;
-
   if (params.action === 'overlay') {
     // Launched from another app via mic button – show overlay, auto-hide when done.
+    // webOSRelaunch does not reliably fire on all TV models, so subscribeVoiceState
+    // is also auto-triggered from the subscription callback on state transitions.
     _overlayMode = true;
     showMain();
+    if (!_voiceStateSub) subscribeVoiceState();
     return;
   }
+
+  if (!haClient?.connected) return;
 
   if (params.action === 'start') {
     voiceStart();
@@ -154,11 +159,30 @@ function handleLaunchParams(params) {
   }
 }
 
+// ── Visibility-based re-subscribe ─────────────────────────────────────────────
+// webOS WAM may freeze JS when the app is backgrounded, so the voice/state
+// subscription callback won't fire while frozen.  When applicationManager/launch
+// brings the app to the foreground, visibilitychange fires and we re-subscribe
+// to get the current service state immediately.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && screenMain.classList.contains('active')) {
+    subscribeVoiceState();
+  }
+});
+
 // ── Boot ───────────────────────────────────────────────────────────────────────
 const launchParams = getLaunchParams();
 
+// Set overlay mode immediately from launch params — don't wait for HA connection
+// or the voice/state subscription. If the pipeline finishes before those are ready,
+// _overlayMode would stay false and PalmSystem.hide() would never be called.
+if (launchParams.action === 'overlay') {
+  _overlayMode = true;
+}
+
 if (config.url && config.token) {
   showMain();
+  subscribeVoiceState();
   initClient(launchParams);
 } else if (window.PalmServiceBridge) {
   // localStorage may have been cleared (webOS memory pressure / reinstall).
@@ -175,6 +199,7 @@ if (config.url && config.token) {
       };
       saveConfig(config);
       showMain();
+      subscribeVoiceState();
       initClient(launchParams);
     })
     .catch(() => showConfig());
@@ -317,7 +342,8 @@ function initClient(initialParams = {}) {
 
   haClient.on('disconnected', () => {
     setConnState('disconnected', 'Disconnected');
-    cancelVoiceStateSub();
+    // Do NOT cancel voice/state subscription on HA disconnect — it is a local
+    // Luna service subscription and must stay alive for mic-button feedback.
     cancelTvPowerSub();
     setOrbState(SvcState.IDLE);
   });
@@ -381,8 +407,24 @@ function subscribeVoiceState() {
     {},
     (res) => {
       if (!res.returnValue) return;
-      svcState      = res.state || SvcState.IDLE;
-      svcTranscript = res.transcript || '';
+      const newState = res.state || SvcState.IDLE;
+      svcTranscript  = res.transcript || '';
+
+      // Mic button pressed while in another app: service launched us but
+      // webOSRelaunch may not fire on this TV model.  Detect the idle→listening
+      // transition and enter overlay mode so we auto-hide when the pipeline ends.
+      if (newState === SvcState.LISTENING && svcState === SvcState.IDLE) {
+        if (_appInitiatedVoice) {
+          _appInitiatedVoice = false; // app started it — stay in normal mode
+        } else if (!_overlayMode && document.hidden) {
+          // External trigger (mic button) while app is backgrounded — act as overlay.
+          // Skip when app is foreground: PalmSystem.hide() would wrongly dismiss it.
+          _overlayMode = true;
+          try { window.PalmSystem?.show?.(); } catch (_) {}
+        }
+      }
+
+      svcState = newState;
       setOrbState(svcState);
       if (svcTranscript) {
         showTranscript(svcTranscript);
@@ -465,6 +507,7 @@ function playTts(ttsUrl) {
 
 function voiceStart() {
   if (!haClient?.connected) return;
+  _appInitiatedVoice = true;
   lunaCall('luna://com.homebrew.havoice.service/voice/start', { fromApp: true }).catch(
     e => console.warn('[voice] start failed:', e.message)
   );
@@ -541,6 +584,7 @@ function hideTranscript() {
 
 // ── Input handling ─────────────────────────────────────────────────────────────
 orb.addEventListener('click', handleVoiceActivation);
+voiceOverlay.addEventListener('click', handleVoiceActivation);
 
 document.addEventListener('keydown', (e) => {
   if (screenConfig.classList.contains('active')) return;
@@ -552,6 +596,11 @@ document.addEventListener('keydown', (e) => {
     if (svcState !== SvcState.IDLE && svcState !== SvcState.ERROR) {
       e.preventDefault();
       voiceAbort();
+    } else if (_overlayMode) {
+      // Dismiss a stuck overlay (e.g. pipeline never ran) with the Back key.
+      e.preventDefault();
+      _overlayMode = false;
+      if (window.PalmSystem) window.PalmSystem.hide();
     }
   }
 });

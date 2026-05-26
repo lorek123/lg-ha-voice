@@ -8,9 +8,15 @@ dist/
 # Developer tooling / local environment
 .claude/
 
+# Downloaded Chromium for dev testing (matches webOS TV engine ~M87)
+chromium/
+
 # Reverse engineering workspace (not part of the app)
 ghidra/
 reverse/
+
+# Dev tooling (local only)
+drive-dev.mjs
 
 # Logs
 *.log
