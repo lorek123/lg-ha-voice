@@ -227,13 +227,15 @@ function stopConfigPolling() {
   if (_configPollTimer) { clearInterval(_configPollTimer); _configPollTimer = null; }
 }
 
-function startConfigPolling(baseUrl) {
+function startConfigPolling() {
   stopConfigPolling();
   _configPollTimer = setInterval(async () => {
     if (!screenConfig.classList.contains('active')) { stopConfigPolling(); return; }
     try {
-      const res = await fetch(baseUrl + '/pending-config');
-      const cfg = await res.json();
+      // F3: pull the phone-completed setup config over Luna (bus-authenticated),
+      // not the old public /pending-config HTTP route.
+      const res = await lunaCall('luna://com.homebrew.havoice.service/getPendingConfig', {});
+      const cfg = res && res.config;
       if (cfg && cfg.url && cfg.token) {
         stopConfigPolling();
         config = { url: cfg.url, token: cfg.token, refreshToken: cfg.refreshToken || '', clientId: cfg.clientId || '', pipelineId: '' };
@@ -256,7 +258,7 @@ async function startSetupServer() {
       const res = await lunaCall('luna://com.homebrew.havoice.service/startSetupServer', {});
       if (res.url) {
         setupUrl.textContent = res.url;
-        startConfigPolling(res.url);
+        startConfigPolling();
         return;
       }
       lastErr = 'no url in response';

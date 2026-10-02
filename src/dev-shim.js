@@ -95,6 +95,11 @@ class FakePalmServiceBridge {
       this._reply({ returnValue: false, errorText: 'dev mode' });
       return;
     }
+    if (uri.includes('getPendingConfig')) {
+      // No phone-completed config in dev; polling continues harmlessly.
+      this._reply({ returnValue: true, config: null });
+      return;
+    }
     if (uri.includes('startSetupServer')) {
       // Return the dev server URL; config polling will 404 harmlessly.
       this._reply({ returnValue: true, url: `http://${location.host}` });
