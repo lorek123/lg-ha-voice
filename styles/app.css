@@ -566,3 +566,58 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .orb-container { animation: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   REDESIGN PROTOTYPE — vanilla + Norigin spatial navigation
+   Layered as overrides so markup/ids stay stable. Headline change: a visible
+   5-way focus ring ([data-focused="true"]) for remote navigation + a cleaner surface.
+   ════════════════════════════════════════════════════════════════════════════ */
+:root {
+  --accent-2: #7c4dff;
+  --ring: #4fc3f7;
+  --surface-2: #232347;
+  --radius: 18px;
+}
+
+#screen-main {
+  background: radial-gradient(1200px 800px at 50% 35%, #15152b 0%, #0b0b16 70%);
+}
+
+.config-panel {
+  background: linear-gradient(160deg, var(--surface-2), var(--surface));
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 60px rgba(0,0,0,0.55);
+}
+
+.logo {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ── Visible focus ring for remote navigation ─────────────────────────────── */
+[data-focused="true"] {
+  outline: none;
+  transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+.form-group input[data-focused="true"],
+.form-group select[data-focused="true"] {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px rgba(79,195,247,0.35);
+}
+.btn-primary[data-focused="true"],
+.btn-setup[data-focused="true"] {
+  box-shadow: 0 0 0 3px rgba(79,195,247,0.55), 0 8px 24px rgba(3,169,244,0.35);
+  transform: translateY(-1px);
+}
+.btn-icon[data-focused="true"] {
+  color: var(--ring);
+  box-shadow: 0 0 0 3px rgba(79,195,247,0.5);
+  border-radius: 10px;
+}
+#orb { outline: none; }
+#orb[data-focused="true"] .orb-inner {
+  box-shadow: 0 0 0 4px rgba(79,195,247,0.6), 0 0 50px var(--accent-glow);
+}
