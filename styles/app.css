@@ -535,3 +535,34 @@ html, body {
   color: var(--text-dim);
   min-height: 1.2em;
 }
+
+/* ── OLED burn-in mitigation ─────────────────────────────────────────────────
+   The orb + state label are bright, static UI that can sit on screen for long
+   idle periods — a burn-in risk on OLED panels. Perpetually nudge the orb
+   cluster by a few pixels so no pixel stays lit identically, and dim the screen
+   after a spell of inactivity (driven by the idle watchdog in main.js). */
+@keyframes burnin-shift {
+  0%   { transform: translate(0, 0); }
+  25%  { transform: translate(4px, -3px); }
+  50%  { transform: translate(-3px, 4px); }
+  75%  { transform: translate(3px, 3px); }
+  100% { transform: translate(0, 0); }
+}
+.orb-container {
+  /* step-end = discrete periodic jumps (like LG's own Screen Shift), so the orb
+     holds still between shifts rather than drifting continuously. */
+  animation: burnin-shift 160s step-end infinite;
+  will-change: transform;
+}
+
+#app {
+  transition: opacity 0.8s ease, filter 0.8s ease;
+}
+#app.screen-dim {
+  opacity: 0.45;
+  filter: brightness(0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-container { animation: none; }
+}

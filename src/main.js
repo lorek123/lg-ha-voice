@@ -100,6 +100,7 @@ const setupUrl         = $('setup-url');
 const voiceOverlay     = $('voice-overlay');
 const overlayLabel     = $('overlay-label');
 const overlayTranscript = $('overlay-transcript');
+const appEl            = $('app');
 
 // ── App state ──────────────────────────────────────────────────────────────────
 let haClient     = null;
@@ -273,6 +274,7 @@ async function startSetupServer() {
 function showMain() {
   screenConfig.classList.remove('active');
   screenMain.classList.add('active');
+  armIdle();
 }
 
 function showConfigStatus(msg, type) {
@@ -545,6 +547,7 @@ const OVERLAY_LABELS = {
 const ACTIVE_STATES = new Set([SvcState.LISTENING, SvcState.PROCESSING, SvcState.SPEAKING]);
 
 function setOrbState(state) {
+  armIdle(state);
   orb.className = `orb ${state}`;
   stateLabel.textContent = STATE_LABELS[state] ?? '';
 
@@ -583,6 +586,54 @@ function hideTranscript() {
   transcriptBox.classList.add('hidden');
   transcriptText.textContent = '';
 }
+
+// ── OLED burn-in: idle screen-protection ───────────────────────────────────────
+// A bright, static orb left on an OLED panel risks burn-in. After a spell of
+// inactivity we dim the screen (reduces luminance, the real driver), and after a
+// longer spell hand off to LG's own screensaver. Thresholds are overridable via
+// window.__havoiceIdle (used by the UI tests). The perpetual pixel-shift lives in
+// styles/app.css. Rationale mirrors the lg-webos-dashboard OLED-care notes.
+const _idleCfg = (typeof window !== 'undefined' && window.__havoiceIdle) || {};
+const IDLE_DIM_MS   = _idleCfg.dimMs   ?? 60000;    // dim after 60s idle
+const IDLE_SAVER_MS = _idleCfg.saverMs ?? 300000;   // LG screensaver after 5 min idle
+let _idleDimTimer = null, _idleSaverTimer = null, _lastWake = 0;
+
+function clearIdleTimers() {
+  if (_idleDimTimer)   { clearTimeout(_idleDimTimer);   _idleDimTimer = null; }
+  if (_idleSaverTimer) { clearTimeout(_idleSaverTimer); _idleSaverTimer = null; }
+}
+
+/** (Re)start the idle countdown. Only protects while idle on the main screen. */
+function armIdle(state) {
+  const s = state ?? svcState;
+  clearIdleTimers();
+  appEl.classList.remove('screen-dim');
+  if (!screenMain.classList.contains('active')) return;
+  if (s !== SvcState.IDLE) return;
+  _idleDimTimer = setTimeout(() => {
+    if (svcState === SvcState.IDLE && screenMain.classList.contains('active')) {
+      appEl.classList.add('screen-dim');
+    }
+  }, IDLE_DIM_MS);
+  _idleSaverTimer = setTimeout(() => {
+    // Only on a real TV, when idle and not acting as an overlay over another app.
+    if (svcState === SvcState.IDLE && !_overlayMode && window.PalmSystem) {
+      lunaCall('luna://com.webos.service.tvpower/power/turnOnScreenSaver', {}).catch(() => {});
+    }
+  }, IDLE_SAVER_MS);
+}
+
+/** Any user activity wakes the screen and restarts the countdown (throttled). */
+function wakeIdle() {
+  appEl.classList.remove('screen-dim');
+  const now = Date.now();
+  if (now - _lastWake < 1000) return;
+  _lastWake = now;
+  armIdle();
+}
+
+['keydown', 'pointerdown', 'mousemove'].forEach((ev) =>
+  document.addEventListener(ev, wakeIdle, true));
 
 // ── Input handling ─────────────────────────────────────────────────────────────
 orb.addEventListener('click', handleVoiceActivation);
