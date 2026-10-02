@@ -10,10 +10,14 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "esbuild src/dev-entry.js --bundle --sourcemap --target=esnext --servedir=. --outfile=bundle.js --serve=3000"
+    "dev": "esbuild src/dev-entry.js --bundle --sourcemap --target=esnext --servedir=. --outfile=bundle.js --serve=3000",
+    "test:ui": "playwright test",
+    "test:ui:headed": "playwright test --headed",
+    "test:ui:report": "playwright show-report"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@playwright/test": "^1.63.0",
     "@webos-tools/cli": "^3.2.3",
     "esbuild": "^0.25.0",
     "eslint": "^9.0.0",

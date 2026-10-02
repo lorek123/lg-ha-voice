@@ -28,6 +28,14 @@ function pushState(state, extra = {}) {
   if (el) el.textContent = state;
 }
 
+// Deterministic control surface for UI tests (dev build only — dev-shim is never
+// bundled into production). Lets Playwright set a voice state without depending on
+// the shim's internal setTimeout timing.
+window.__havoice = {
+  setState: (state, extra = {}) => pushState(state, extra),
+  getState: () => _state,
+};
+
 // ── Fake PalmServiceBridge ────────────────────────────────────────────────────
 
 class FakePalmServiceBridge {

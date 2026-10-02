@@ -24,3 +24,13 @@ drive-dev.mjs
 # Environment files
 .env
 .env.local
+
+# Playwright UI tests
+/test-results/
+/playwright-report/
+/blob-report/
+.cache/ms-playwright/
+
+# esbuild dev bundle
+/bundle.js
+/bundle.js.map
