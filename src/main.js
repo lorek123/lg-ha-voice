@@ -17,6 +17,7 @@
 
 import { HAClient } from './ha-client.js';
 import { lunaCall, lunaSubscribe } from './luna.js';
+import { initSpatialNav, refreshFocus } from './spatial-nav.js';
 
 // ── Key codes ──────────────────────────────────────────────────────────────────
 const KEY = {
@@ -25,7 +26,7 @@ const KEY = {
   MIC: 409,
   AI: 1060,
 };
-const VOICE_KEYS = new Set([KEY.OK, KEY.MIC, KEY.AI]);
+const VOICE_KEYS = new Set([KEY.MIC, KEY.AI]); // OK is routed through spatial-nav to the focused control
 
 // ── Voice state (mirrored from service via subscription) ──────────────────────
 const SvcState = Object.freeze({
@@ -174,6 +175,7 @@ document.addEventListener('visibilitychange', () => {
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 const launchParams = getLaunchParams();
+initSpatialNav();
 
 // Set overlay mode immediately from launch params — don't wait for HA connection
 // or the voice/state subscription. If the pipeline finishes before those are ready,
@@ -205,6 +207,7 @@ if (config.url && config.token) {
 function showConfig() {
   screenConfig.classList.add('active');
   screenMain.classList.remove('active');
+  refreshFocus('#screen-config', 'ha-url');
 
   inputUrl.value      = config.url ?? '';
   inputToken.value    = config.token ?? '';
@@ -302,6 +305,7 @@ function showMain() {
   screenConfig.classList.remove('active');
   screenMain.classList.add('active');
   armIdle();
+  refreshFocus('#screen-main', 'orb');
 }
 
 function showConfigStatus(msg, type) {
@@ -411,7 +415,7 @@ async function checkSetup() {
   } catch (_) {}
 }
 
-function showSetupNotice() { setupNotice.classList.remove('hidden'); }
+function showSetupNotice() { setupNotice.classList.remove('hidden'); refreshFocus('#screen-main', 'orb'); }
 function hideSetupNotice() { setupNotice.classList.add('hidden'); }
 
 btnSetup.addEventListener('click', async () => {
