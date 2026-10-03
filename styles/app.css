@@ -356,7 +356,11 @@ html, body {
   right: 0;
   bottom: 0;
   left: 0;
-  background: rgba(13, 13, 26, 0.97);
+  /* Soft centre scrim for legibility, fading to clear at the edges so the app
+     behind shows through — a translucent overlay, not a full cover. */
+  background: radial-gradient(ellipse 70% 60% at 50% 45%,
+              rgba(8,10,20,0.66) 0%, rgba(8,10,20,0.40) 45%,
+              rgba(8,10,20,0.10) 75%, rgba(8,10,20,0) 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -621,3 +625,13 @@ html, body {
 #orb[data-focused="true"] .orb-inner {
   box-shadow: 0 0 0 4px rgba(79,195,247,0.6), 0 0 50px var(--accent-glow);
 }
+
+
+/* ── Overlay mode (launched over another app via the mic button) ────────────
+   The webOS window is transparent (appinfo). Don't paint the opaque main-screen
+   background or show the orb/footer — only the floating voice overlay, so the
+   underlying app stays visible behind a translucent scrim. */
+#app.overlay-mode .screen,
+#app.overlay-mode #screen-main { background: transparent; }
+#app.overlay-mode #screen-main > * { display: none; }  /* hide orb, footer, notices */
+#app.overlay-mode #voice-overlay { display: flex; }

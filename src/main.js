@@ -107,6 +107,12 @@ const appEl            = $('app');
 let haClient     = null;
 let config       = loadConfig();
 let _overlayMode = false;  // true when launched from another app via overlay param
+// Reflect overlay mode as a class on #app so CSS can go fully transparent (show
+// the app underneath) instead of painting the opaque main-screen background.
+function setOverlayMode(on) {
+  _overlayMode = on;
+  try { appEl.classList.toggle('overlay-mode', on); } catch (_) {}
+}
 let _authRecoveryTried = false; // guard: only try service-config recovery once per session
 
 // ── webOS launch params ────────────────────────────────────────────────────────
@@ -133,7 +139,7 @@ function handleLaunchParams(params) {
       saveConfig(config);
       haClient?.disconnect();
       haClient = null;
-      _overlayMode = false;
+      setOverlayMode(false);
       showMain();
       subscribeVoiceState();
       initClient({});
@@ -145,7 +151,7 @@ function handleLaunchParams(params) {
     // Launched from another app via mic button – show overlay, auto-hide when done.
     // webOSRelaunch does not reliably fire on all TV models, so subscribeVoiceState
     // is also auto-triggered from the subscription callback on state transitions.
-    _overlayMode = true;
+    setOverlayMode(true);
     showMain();
     if (!_voiceStateSub) subscribeVoiceState();
     return;
@@ -181,7 +187,7 @@ initSpatialNav();
 // or the voice/state subscription. If the pipeline finishes before those are ready,
 // _overlayMode would stay false and PalmSystem.hide() would never be called.
 if (launchParams.action === 'overlay') {
-  _overlayMode = true;
+  setOverlayMode(true);
 }
 
 if (config.url && config.token) {
@@ -464,7 +470,7 @@ function subscribeVoiceState() {
         } else if (!_overlayMode && document.hidden) {
           // External trigger (mic button) while app is backgrounded — act as overlay.
           // Skip when app is foreground: PalmSystem.hide() would wrongly dismiss it.
-          _overlayMode = true;
+          setOverlayMode(true);
           try { window.PalmSystem?.show?.(); } catch (_) {}
         }
       }
@@ -607,12 +613,13 @@ function setOrbState(state) {
       speakNative('Sorry, something went wrong.');
     }
 
-    if (_overlayMode && state === SvcState.IDLE) {
-      _overlayMode = false;
-      // Brief pause so the user sees speaking/result before the overlay hides.
+    if (_overlayMode && (state === SvcState.IDLE || state === SvcState.ERROR)) {
+      setOverlayMode(false);
+      // Brief pause so the user sees the result before the overlay hides and we
+      // return to whatever app was in front. Shorter on error (nothing to read).
       setTimeout(() => {
         if (window.PalmSystem) window.PalmSystem.hide();
-      }, 1200);
+      }, state === SvcState.ERROR ? 400 : 1200);
     }
   }
 }
@@ -693,7 +700,7 @@ document.addEventListener('keydown', (e) => {
     } else if (_overlayMode) {
       // Dismiss a stuck overlay (e.g. pipeline never ran) with the Back key.
       e.preventDefault();
-      _overlayMode = false;
+      setOverlayMode(false);
       if (window.PalmSystem) window.PalmSystem.hide();
     }
   }
