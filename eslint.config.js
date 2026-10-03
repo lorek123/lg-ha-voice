@@ -2,7 +2,14 @@ import js from '@eslint/js';
 import globals from 'globals';
 
 export default [
-  { ignores: ['dist/', 'node_modules/'] },
+  {
+    ignores: [
+      'dist/', 'node_modules/',
+      // Generated / local-only (mirrors .gitignore) — not app source.
+      'playwright-report/', 'test-results/', 'blob-report/', 'bundle.js', 'bundle.js.map',
+      'chromium/', 'ghidra/', 'reverse/', 'drive-dev.mjs',
+    ],
+  },
 
   // Recommended rules applied globally, with project-wide overrides
   {
@@ -43,9 +50,20 @@ export default [
     },
   },
 
-  // Tests – Node.js ESM
+  // Tests – Node.js ESM. UI specs also reference browser globals inside
+  // page.evaluate()/addInitScript() callbacks, so include both.
   {
     files: ['test/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.node, ...globals.browser },
+    },
+  },
+
+  // Root tooling configs – Node.js ESM
+  {
+    files: ['*.config.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

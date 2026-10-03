@@ -28,6 +28,14 @@ function pushState(state, extra = {}) {
   if (el) el.textContent = state;
 }
 
+// Deterministic control surface for UI tests (dev build only — dev-shim is never
+// bundled into production). Lets Playwright set a voice state without depending on
+// the shim's internal setTimeout timing.
+window.__havoice = {
+  setState: (state, extra = {}) => pushState(state, extra),
+  getState: () => _state,
+};
+
 // ── Fake PalmServiceBridge ────────────────────────────────────────────────────
 
 class FakePalmServiceBridge {
@@ -93,6 +101,11 @@ class FakePalmServiceBridge {
     if (uri.includes('getConfig')) {
       // No saved config — let the app fall through to the config screen.
       this._reply({ returnValue: false, errorText: 'dev mode' });
+      return;
+    }
+    if (uri.includes('getPendingConfig')) {
+      // No phone-completed config in dev; polling continues harmlessly.
+      this._reply({ returnValue: true, config: null });
       return;
     }
     if (uri.includes('startSetupServer')) {

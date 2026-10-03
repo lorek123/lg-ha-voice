@@ -132,13 +132,15 @@ function getLocalIP() {
 // ── OAuth companion HTTP server ───────────────────────────────────────────────
 
 var setupServer    = null;
+var setupStopTimer = null; // F2: auto-stop the setup server after a window of inactivity
+var SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 var pendingOAuth   = null; // { haUrl, state }
-var pendingConfig  = null; // config ready for the app to pick up via /pending-config
+var pendingConfig  = null; // config ready for the app to pick up via getPendingConfig (Luna)
 var OAUTH_STATE_FILE = '/tmp/ha-voice-oauth.json';
 
 function savePendingOAuth(obj) {
   pendingOAuth = obj;
-  try { fs.writeFileSync(OAUTH_STATE_FILE, JSON.stringify(obj)); } catch (_) {}
+  try { fs.writeFileSync(OAUTH_STATE_FILE, JSON.stringify(obj), { mode: 0o600 }); } catch (_) {}
 }
 
 function loadPendingOAuth() {
@@ -216,6 +218,19 @@ var SETUP_PAGE = makeHtml('HA Voice Setup',
   + '</form>'
 );
 
+// F6: a cross-origin POST carries an Origin/Referer that is not our own setup
+// origin (clientId). Browsers always attach Origin to cross-site form submits, so
+// this refuses an attacker page auto-submitting /start-auth to the TV, while a
+// genuine submit from our setup page (same-origin) passes. Requests with neither
+// header (non-browser) are not treated as cross-origin.
+function isCrossOrigin(req, clientId) {
+  var origin = req.headers.origin;
+  if (origin) return origin !== clientId;
+  var ref = req.headers.referer;
+  if (ref) return ref !== clientId && ref.indexOf(clientId + '/') !== 0;
+  return false;
+}
+
 function startOAuthServer(clientId) {
   return new Promise(function(resolve, reject) {
     if (setupServer) { resolve(); return; }
@@ -225,6 +240,11 @@ function startOAuthServer(clientId) {
 
       // ── POST /start-auth ──
       if (req.method === 'POST' && parsed.pathname === '/start-auth') {
+        // F6: CSRF defenses — refuse cross-origin submits and anything that isn't
+        // the setup form's own urlencoded body.
+        if (isCrossOrigin(req, clientId)) { res.writeHead(403); res.end('cross-origin blocked'); return; }
+        var ctype = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+        if (ctype !== 'application/x-www-form-urlencoded') { res.writeHead(415); res.end('unsupported content-type'); return; }
         var body = '';
         req.on('data', function(c) { body += c; });
         req.on('end', function() {
@@ -234,6 +254,10 @@ function startOAuthServer(clientId) {
             if (decodeURIComponent(kv[0]) === 'haUrl') haUrl = decodeURIComponent(kv[1] || '').replace(/\/$/, '');
           });
           if (!haUrl) { res.writeHead(400); res.end('haUrl required'); return; }
+          // F6: haUrl is fed to server-side httpPost() below (SSRF sink). Require an
+          // http(s) URL so schemes like file:// cannot be injected. (Private-range-only
+          // would be stronger but breaks legitimately-remote HA instances.)
+          if (!/^https?:\/\/[^\s]+$/i.test(haUrl)) { res.writeHead(400); res.end('invalid haUrl'); return; }
 
           var state  = crypto.randomBytes(8).toString('hex');
           savePendingOAuth({ haUrl: haUrl, state: state });
@@ -257,10 +281,10 @@ function startOAuthServer(clientId) {
         var pending = loadPendingOAuth();
 
         if (!code || !pending || pending.state !== state) {
-          var errDetail = 'got=' + state + ' expected=' + (pending ? pending.state : 'NO_PENDING');
-          log('callback state mismatch:', errDetail);
+          // F5: never reflect attacker-controlled `state` into the page. Keep detail in the log.
+          log('callback state mismatch: got=' + state + ' expected=' + (pending ? pending.state : 'NO_PENDING'));
           res.writeHead(400, { 'Content-Type': 'text/html' });
-          res.end(makeHtml('Error', '<p class="msg err">Invalid OAuth state. Please try again.</p><p class="msg" style="font-size:.7rem;opacity:.6">' + errDetail + '</p>'));
+          res.end(makeHtml('Error', '<p class="msg err">Invalid OAuth state. Please try again.</p>'));
           return;
         }
 
@@ -295,7 +319,7 @@ function startOAuthServer(clientId) {
           .catch(function(err) {
             log('token exchange error:', err.message);
             res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end(makeHtml('Error', '<p class="msg err">Auth failed: ' + err.message + '</p>'));
+            res.end(makeHtml('Error', '<p class="msg err">Authentication failed. Please try again.</p>'));
           });
         return;
       }
@@ -304,33 +328,6 @@ function startOAuthServer(clientId) {
       if (parsed.pathname === '/ip') {
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end(clientId);
-        return;
-      }
-
-      // ── GET /pending-config ──
-      if (parsed.pathname === '/pending-config') {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        if (pendingConfig) {
-          var cfg = pendingConfig;
-          pendingConfig = null;
-          log('pending-config picked up by app');
-          res.end(JSON.stringify(cfg));
-        } else {
-          res.end('null');
-        }
-        return;
-      }
-
-      // ── GET /voice-state – browser app polls this for UI updates ──
-      if (parsed.pathname === '/voice-state') {
-        var tts = voiceTtsUrl;
-        if (tts) voiceTtsUrl = '';   // deliver once
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({
-          state:      voiceState,
-          transcript: voiceTranscript,
-          ttsUrl:     tts,
-        }));
         return;
       }
 
@@ -504,6 +501,8 @@ try {
   voiceHAConfig = JSON.parse(fs.readFileSync(HA_CONFIG_FILE, 'utf8'));
   log('Loaded HA config for:', voiceHAConfig.url);
 } catch (_) {}
+// Harden perms on the token file (historically created 0777). Owner-only.
+try { fs.chmodSync(HA_CONFIG_FILE, 0o600); } catch (_) {}
 
 /**
  * Push current voice state to all subscribers. ttsUrl is delivered once
@@ -588,7 +587,7 @@ function ensureFreshToken() {
     cfg.token = res.body.access_token;
     if (res.body.refresh_token) cfg.refreshToken = res.body.refresh_token;
     voiceHAConfig = cfg;
-    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(cfg)); } catch (_) {}
+    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(cfg), { mode: 0o600 }); } catch (_) {}
   });
 }
 
@@ -665,7 +664,7 @@ function handlePipelineEvent(evt) {
   log('pipeline event:', evt.type);
   if (evt.type === 'stt-end') {
     voiceTranscript = (evt.data && evt.data.stt_output && evt.data.stt_output.text) || '';
-    log('transcript:', voiceTranscript);
+    log('transcript received, len=' + voiceTranscript.length); // F7: never log the text
     setVoiceState('processing');
 
   } else if (evt.type === 'tts-start') {
@@ -816,7 +815,7 @@ service.register('setHAConfig', function(message) {
       clientId:     p.clientId     || '',
       sttMode:      p.sttMode      || STT_MODE.LG,
     };
-    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(voiceHAConfig)); } catch (_) {}
+    try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(voiceHAConfig), { mode: 0o600 }); } catch (_) {}
     log('HA config updated for:', voiceHAConfig.url);
   }
   message.respond({ returnValue: true });
@@ -939,18 +938,45 @@ service.register('startSetupServer', function(message) {
   startOAuthServer(clientId).catch(function(err) {
     log('startOAuthServer error:', err.message);
   });
+
+  // F2: the setup server is only needed for the few minutes of OAuth. Auto-stop it
+  // so 0.0.0.0:8642 isn't left listening for the life of the TV.
+  if (setupStopTimer) clearTimeout(setupStopTimer);
+  setupStopTimer = setTimeout(function() {
+    setupStopTimer = null;
+    if (setupServer) {
+      setupServer.close();
+      setupServer = null;
+      clearPendingOAuth();
+      log('setup server auto-stopped after timeout');
+    }
+  }, SETUP_TIMEOUT_MS);
 });
 
 /**
  * /stopSetupServer – shut down the companion HTTP server.
  */
 service.register('stopSetupServer', function(message) {
+  if (setupStopTimer) { clearTimeout(setupStopTimer); setupStopTimer = null; }
   if (setupServer) {
     setupServer.close();
     setupServer = null;
     clearPendingOAuth();
   }
   message.respond({ returnValue: true });
+});
+
+/**
+ * /getPendingConfig – Luna replacement for the old public /pending-config HTTP
+ * route (F3). The phone-based setup flow stores the freshly-obtained HA config in
+ * `pendingConfig`; the on-TV app polls this over the (bus-authenticated) Luna
+ * socket instead of an open, wildcard-CORS HTTP endpoint. Delivered once.
+ */
+service.register('getPendingConfig', function(message) {
+  var cfg = pendingConfig;
+  pendingConfig = null;
+  if (cfg) log('pending-config picked up by app (luna)');
+  message.respond({ returnValue: true, config: cfg || null });
 });
 
 log('Service started (PID ' + process.pid + ', root: ' + isRoot() + ')');
@@ -1175,15 +1201,7 @@ function runHATextPipeline(text, onIntentResult) {
 
 startVcInteractor();
 
-// Auto-start HTTP server to keep event loop alive and allow /pending-config polling.
-(function() {
-  var ip = getLocalIP();
-  if (ip) {
-    var clientId = 'http://' + ip + ':' + SETUP_PORT;
-    startOAuthServer(clientId).then(function() {
-      log('Setup server auto-started at', clientId);
-    }).catch(function(err) {
-      log('Setup server auto-start failed:', err.message);
-    });
-  }
-}());
+// F2: the setup server no longer runs from boot — it is started on demand via
+// startSetupServer and stopped on completion/timeout. Keep the Node event loop
+// alive explicitly (previously the always-on HTTP server did this implicitly).
+setInterval(function() {}, 1 << 30);
