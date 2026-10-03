@@ -106,6 +106,7 @@ const appEl            = $('app');
 let haClient     = null;
 let config       = loadConfig();
 let _overlayMode = false;  // true when launched from another app via overlay param
+let _authRecoveryTried = false; // guard: only try service-config recovery once per session
 
 // ── webOS launch params ────────────────────────────────────────────────────────
 function getLaunchParams() {
@@ -190,15 +191,7 @@ if (config.url && config.token) {
   // Try to recover from the config the service persisted to disk.
   lunaCall('luna://com.homebrew.havoice.service/getConfig', {})
     .then(svcCfg => {
-      config = {
-        url:          svcCfg.url,
-        token:        svcCfg.token,
-        pipelineId:   svcCfg.pipelineId   || '',
-        refreshToken: svcCfg.refreshToken || '',
-        clientId:     svcCfg.clientId     || '',
-        sttMode:      svcCfg.sttMode      || 'lg',
-      };
-      saveConfig(config);
+      applyServiceConfig(svcCfg);
       showMain();
       subscribeVoiceState();
       initClient(launchParams);
@@ -271,6 +264,40 @@ async function startSetupServer() {
   setupUrl.textContent = 'Error: ' + lastErr;
 }
 
+// Build the app config from the service's persisted copy (which holds the OAuth
+// refresh token + clientId and auto-refreshes the access token in getConfig).
+function applyServiceConfig(svcCfg) {
+  config = {
+    url:          svcCfg.url,
+    token:        svcCfg.token,
+    pipelineId:   svcCfg.pipelineId   || '',
+    refreshToken: svcCfg.refreshToken || '',
+    clientId:     svcCfg.clientId     || '',
+    sttMode:      svcCfg.sttMode      || 'lg',
+  };
+  saveConfig(config); // heal any localStorage/service divergence
+}
+
+/**
+ * Last-ditch recovery when the stored token fails auth: the Luna service keeps
+ * the refresh token + clientId and refreshes the access token inside getConfig,
+ * so a localStorage copy that lost its refresh creds can be rescued from it
+ * instead of dumping the user back to the setup screen.
+ */
+async function recoverFromServiceConfig() {
+  if (!window.PalmServiceBridge) throw new Error('no service bridge');
+  const svcCfg = await lunaCall('luna://com.homebrew.havoice.service/getConfig', {});
+  if (!svcCfg || !svcCfg.url || !svcCfg.token) throw new Error('no service config');
+  // Only worth retrying if the service can actually refresh (has creds) or gave
+  // us a different (freshly-refreshed) token than the one that just failed.
+  if (svcCfg.token === config.token && !svcCfg.refreshToken) throw new Error('nothing better to try');
+  applyServiceConfig(svcCfg);
+  haClient?.disconnect();
+  haClient = null;
+  showMain();
+  initClient({});
+}
+
 function showMain() {
   screenConfig.classList.remove('active');
   screenMain.classList.add('active');
@@ -329,6 +356,7 @@ function initClient(initialParams = {}) {
 
   haClient.on('connected', () => {
     setConnState('connected', 'Connected');
+    _authRecoveryTried = false;
 
     // Push HA config to service so it can run the voice pipeline.
     syncServiceConfig();
@@ -354,6 +382,15 @@ function initClient(initialParams = {}) {
 
   haClient.on('auth_error', (msg) => {
     setConnState('disconnected', 'Auth failed');
+    if (!_authRecoveryTried) {
+      _authRecoveryTried = true;
+      setConnState('connecting', 'Recovering…');
+      recoverFromServiceConfig().catch(() => {
+        showConfig();
+        showConfigStatus(`Authentication failed: ${msg}`, 'error');
+      });
+      return;
+    }
     showConfig();
     showConfigStatus(`Authentication failed: ${msg}`, 'error');
   });

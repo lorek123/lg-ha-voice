@@ -306,13 +306,22 @@ function startOAuthServer(clientId) {
               throw new Error('Token exchange failed (status ' + status + ')');
             }
 
-            pendingConfig = {
+            var newCfg = {
               url:          haUrl,
               token:        tokens.access_token,
-              refreshToken: tokens.refresh_token,
+              refreshToken: tokens.refresh_token || '',
               clientId:     clientId,
+              pipelineId:   (voiceHAConfig && voiceHAConfig.pipelineId) || '',
+              sttMode:      (voiceHAConfig && voiceHAConfig.sttMode)    || STT_MODE.LG,
             };
-            log('OAuth complete, pendingConfig set for', haUrl);
+            pendingConfig = newCfg;
+            // Persist immediately to the shared config file + in-memory so the fresh
+            // creds survive even if the app isn't foreground-polling getPendingConfig
+            // (the app then recovers them via getConfig). Delivery no longer depends
+            // on a consume-once handoff.
+            voiceHAConfig = newCfg;
+            try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(newCfg), { mode: 0o600 }); } catch (_) {}
+            log('OAuth complete, config persisted for', haUrl);
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(makeHtml('Connected!', '<p class="msg ok">Connected! You can close this page.</p>'));
           })
@@ -581,7 +590,19 @@ function ensureFreshToken() {
     + '&client_id='     + encodeURIComponent(cfg.clientId);
   return httpPost(cfg.url + '/auth/token', body).then(function(res) {
     if (res.status !== 200 || !res.body.access_token) {
-      throw new Error('token refresh HTTP ' + res.status);
+      var errCode = (res.body && res.body.error) || ('HTTP ' + res.status);
+      log('token refresh FAILED:', errCode);
+      // A revoked/expired refresh token (invalid_grant) will never succeed —
+      // clear it so getConfig stops handing back a dead token and the app
+      // prompts for a fresh login instead of looping on auth_invalid.
+      if (res.status === 400 || (res.body && res.body.error === 'invalid_grant')) {
+        cfg.refreshToken = '';
+        cfg.clientId = '';
+        voiceHAConfig = cfg;
+        try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(cfg), { mode: 0o600 }); } catch (_) {}
+        log('cleared revoked refresh token — re-auth required');
+      }
+      throw new Error('token refresh failed: ' + errCode);
     }
     log('token refreshed OK');
     cfg.token = res.body.access_token;
@@ -794,10 +815,13 @@ service.register('getConfig', function(message) {
       sttMode:      voiceHAConfig.sttMode      || STT_MODE.LG,
     });
   }
-  // Best-effort refresh for OAuth tokens before returning.
-  // If refresh fails, return the stored token anyway – the browser's HAClient
-  // will handle auth_invalid and retry with the refresh token itself.
-  ensureFreshToken().then(respond).catch(respond);
+  // Best-effort refresh for OAuth tokens before returning. If refresh fails we
+  // still respond (with whatever creds remain — ensureFreshToken clears a revoked
+  // token), but we log it rather than swallowing it silently.
+  ensureFreshToken().then(respond).catch(function(err) {
+    log('getConfig: token refresh failed:', err.message);
+    respond();
+  });
 });
 
 /**

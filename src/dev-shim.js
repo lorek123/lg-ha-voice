@@ -99,6 +99,8 @@ class FakePalmServiceBridge {
       return;
     }
     if (uri.includes('getConfig')) {
+      // Tests can stand in a "service-persisted" config for the recovery path.
+      if (window.__havoiceSvcConfig) { this._reply({ returnValue: true, ...window.__havoiceSvcConfig }); return; }
       // No saved config — let the app fall through to the config screen.
       this._reply({ returnValue: false, errorText: 'dev mode' });
       return;
@@ -157,7 +159,8 @@ class FakeHAWebSocket {
   send(dataStr) {
     const msg = JSON.parse(dataStr);
     if (msg.type === 'auth') {
-      setTimeout(() => this._recv({ type: 'auth_ok' }), 20);
+      const bad = window.__havoiceBadToken && msg.access_token === window.__havoiceBadToken;
+      setTimeout(() => this._recv(bad ? { type: 'auth_invalid', message: 'Invalid token' } : { type: 'auth_ok' }), 20);
     } else if (msg.type === 'assist_pipeline/run') {
       setTimeout(() => this._recv({ type: 'result', id: msg.id, success: true, result: {} }), 20);
     }
