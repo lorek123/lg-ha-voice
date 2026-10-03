@@ -531,11 +531,25 @@ function broadcastVoiceState() {
   });
 }
 
+var _pipelineWatchdog = null;
 function setVoiceState(s) {
   if (voiceState === s) return;
   log('voice state:', voiceState, '->', s);
   voiceState = s;
   broadcastVoiceState();
+
+  // Watchdog: never hang in listening/processing. If STT/intent never resolves
+  // (e.g. HA returns no audio/result), force an error → idle so the UI overlay
+  // hides and control returns to the foreground app instead of sticking.
+  if (_pipelineWatchdog) { clearTimeout(_pipelineWatchdog); _pipelineWatchdog = null; }
+  if (s === 'listening' || s === 'processing') {
+    _pipelineWatchdog = setTimeout(function() {
+      if (voiceState === 'listening' || voiceState === 'processing') {
+        log('pipeline watchdog fired (no result) — aborting');
+        setVoiceError('no response from voice pipeline');
+      }
+    }, 15000);
+  }
 }
 
 function voiceCleanup() {
