@@ -306,13 +306,22 @@ function startOAuthServer(clientId) {
               throw new Error('Token exchange failed (status ' + status + ')');
             }
 
-            pendingConfig = {
+            var newCfg = {
               url:          haUrl,
               token:        tokens.access_token,
-              refreshToken: tokens.refresh_token,
+              refreshToken: tokens.refresh_token || '',
               clientId:     clientId,
+              pipelineId:   (voiceHAConfig && voiceHAConfig.pipelineId) || '',
+              sttMode:      (voiceHAConfig && voiceHAConfig.sttMode)    || STT_MODE.LG,
             };
-            log('OAuth complete, pendingConfig set for', haUrl);
+            pendingConfig = newCfg;
+            // Persist immediately to the shared config file + in-memory so the fresh
+            // creds survive even if the app isn't foreground-polling getPendingConfig
+            // (the app then recovers them via getConfig). Delivery no longer depends
+            // on a consume-once handoff.
+            voiceHAConfig = newCfg;
+            try { fs.writeFileSync(HA_CONFIG_FILE, JSON.stringify(newCfg), { mode: 0o600 }); } catch (_) {}
+            log('OAuth complete, config persisted for', haUrl);
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(makeHtml('Connected!', '<p class="msg ok">Connected! You can close this page.</p>'));
           })
